@@ -1,0 +1,56 @@
+[project]
+name = "semantic-guided-discrete-diffusion"
+version = "0.1.0"
+description = "Semantic-Guided Discrete Diffusion Language Model"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "tqdm>=4.65.0",
+    "tensorboard>=2.13.0",
+    "pillow>=9.5.0",
+    "scipy>=1.10.0",
+    "pyyaml>=6.0",
+    "torchdiffeq>=0.2.3",
+    "pytorch-fid>=0.3.0",
+    "einops>=0.6.0",
+    "click>=8.1.0",
+    "wandb>=0.15.0",
+    "transformers>=4.35.0",
+    "datasets>=2.14.0",
+    "accelerate>=0.24.0",
+    "sentencepiece>=0.1.99",
+    "nltk>=3.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.3.0",
+    "jupyter>=1.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+
+# 1. 定义 PyTorch 的官方 CUDA 仓库 (这里以 CUDA 12.1 为例)
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+# 2. 强制指定 torch 相关库去上面定义的仓库下载
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+# 如果你用了 torchaudio，也要加上：
+# torchaudio = { index = "pytorch-cu128" }
