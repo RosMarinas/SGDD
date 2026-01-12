@@ -1,5 +1,6 @@
 # Phase 1 Configuration: Wikipedia Text Reconstruction
 # 任务: 输入文本 → 编码 → 解码 → 相同文本
+#HF_ENDPOINT=https://hf-mirror.com python src/train.py --config configs/phase1_wiki.yaml
 
 # 模型配置
 model:
@@ -27,13 +28,13 @@ training:
 
   lr_scheduler: "cosine"
   warmup_steps: 1000
-
   use_fp16: true
   cfg_drop_prob: 0.1
 
   log_interval: 10
   save_interval: 1000
   eval_interval: 500
+  save_epochs: 20
 
   use_wandb: true
   wandb_project: "sgdd"

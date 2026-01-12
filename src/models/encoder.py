@@ -44,8 +44,14 @@ class SemanticEncoder(nn.Module):
         for param in self.roberta.parameters():
             param.requires_grad = False
 
-        # Projection layer: 768 (RoBERTa) -> hidden_dim (decoder)
-        self.proj = nn.Linear(768, hidden_dim)
+        # Learnable Adapter: 768 (RoBERTa) -> hidden_dim (decoder)
+        # We use an MLP to better project the semantic space
+        self.adapter = nn.Sequential(
+            nn.Linear(768, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
 
         # Store tokenizer for convenience
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -92,8 +98,8 @@ class SemanticEncoder(nn.Module):
         # Compute mean: [batch_size, 768]
         mean_pooled = sum_hidden / token_counts
 
-        # Project to decoder dimension: [batch_size, hidden_dim]
-        semantic_vector = self.proj(mean_pooled)
+        # Project to decoder dimension using the learnable adapter: [batch_size, hidden_dim]
+        semantic_vector = self.adapter(mean_pooled)
 
         return semantic_vector
 
@@ -175,8 +181,9 @@ if __name__ == "__main__":
         assert param.requires_grad == False, f"Parameter {name} is not frozen!"
     print("[OK] All RoBERTa parameters are frozen")
 
-    # Test projection layer is trainable
-    assert encoder.proj.weight.requires_grad == True, "Projection layer should be trainable"
-    print("[OK] Projection layer is trainable")
+    # Test adapter is trainable
+    for name, param in encoder.adapter.named_parameters():
+        assert param.requires_grad == True, f"Adapter parameter {name} should be trainable"
+    print("[OK] Adapter is trainable")
 
     print("\n[SUCCESS] All tests passed!")

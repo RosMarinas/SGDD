@@ -97,6 +97,90 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
     return q_embed, k_embed
 
 
+class RoPESelfAttention(nn.Module):
+    """
+    Multi-head self-attention with Rotary Position Embeddings (RoPE).
+    
+    Replaces nn.MultiheadAttention to allow manual injection of RoPE 
+    into Query and Key vectors before attention computation.
+    Uses F.scaled_dot_product_attention for efficiency (FlashAttention compatible).
+    """
+    
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.dropout_p = dropout
+        
+        assert self.head_dim * num_heads == hidden_dim, "hidden_dim must be divisible by num_heads"
+        
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+        
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        cos: torch.Tensor, 
+        sin: torch.Tensor, 
+        attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Input tokens [batch, seq_len, hidden_dim]
+            cos, sin: RoPE embeddings [batch, heads, seq_len, head_dim] (broadcastable)
+            attn_mask: Attention mask [batch, seq_len] (0 for pad, 1 for keep) or broadcastable shape.
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Project and reshape to [batch, heads, seq_len, head_dim]
+        # Note: We transpose to [batch, heads, seq_len, head_dim] for SDPA
+        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Apply RoPE to Query and Key
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        
+        # Prepare attention mask for SDPA if needed
+        sdpa_mask = attn_mask
+        if attn_mask is not None:
+            # If mask is [batch, seq_len], we need to expand/invert it for SDPA
+            # SDPA expects:
+            # - None (no mask)
+            # - Boolean mask (True = ignore/mask out, False = keep) - WAIT, PyTorch docs say:
+            #   "Binary mask where True values indicate elements that should be computed (keep), 
+            #    and False values indicate elements that should be ignored (mask)." -> NO, that's for some ops.
+            # Let's check SDPA docs: "attn_mask: ... binary mask (True = attend, False = ignore)... OR additive mask".
+            # Usually for padding mask [batch, seq_len] with 1=keep, 0=pad:
+            # We want to mask out where it is 0.
+            
+            if attn_mask.dim() == 2:
+                # Expand to [batch, 1, 1, seq_len] to broadcast over heads and query sequence
+                # Shape: [batch, heads, queries, keys] -> [batch, 1, 1, seq_len]
+                # We construct an additive mask: 0 for keep, -inf for mask.
+                # attn_mask is 1 for keep, 0 for pad.
+                # (1 - 1) * -inf = 0
+                # (1 - 0) * -inf = -inf
+                sdpa_mask = (1.0 - attn_mask.unsqueeze(1).unsqueeze(1)) * -1e9
+            
+        # Scaled Dot Product Attention
+        # Uses FlashAttention if available and conditions met
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=sdpa_mask,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False # SGDD is bidirectional
+        )
+        
+        # Reshape back to [batch, seq_len, hidden_dim]
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
+        
+        return self.out_proj(out)
+
+
 class SinusoidalTimeEmbedding(nn.Module):
     """
     Sinusoidal timestep embeddings.
@@ -139,7 +223,7 @@ class DecoderLayer(nn.Module):
     Single decoder layer with self-attention, cross-attention, and FFN.
 
     This is a bidirectional transformer layer (no causal mask) with:
-    - Multi-head self-attention over tokens
+    - Multi-head self-attention over tokens (with RoPE)
     - Multi-head cross-attention to semantic vector
     - Position-wise feed-forward network
     """
@@ -165,9 +249,9 @@ class DecoderLayer(nn.Module):
         self.num_heads = num_heads
         self.ffn_dim = ffn_dim
 
-        # Self-attention (bidirectional - NO causal mask)
-        self.self_attn = nn.MultiheadAttention(
-            hidden_dim, num_heads, dropout=dropout, batch_first=True
+        # Self-attention (bidirectional + RoPE)
+        self.self_attn = RoPESelfAttention(
+            hidden_dim, num_heads, dropout=dropout
         )
         self.norm1 = nn.LayerNorm(hidden_dim)
 
@@ -191,6 +275,8 @@ class DecoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         semantic_vector: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -199,13 +285,14 @@ class DecoderLayer(nn.Module):
         Args:
             x: Input tokens [batch, seq_len, hidden_dim]
             semantic_vector: Semantic vector [batch, hidden_dim]
+            cos, sin: RoPE embeddings
             attn_mask: Optional attention mask [seq_len, seq_len]
 
         Returns:
             output: Processed tokens [batch, seq_len, hidden_dim]
         """
-        # Self-attention (bidirectional - no causal mask)
-        attn_output, _ = self.self_attn(x, x, x, attn_mask=attn_mask)
+        # Self-attention with RoPE
+        attn_output = self.self_attn(x, cos, sin, attn_mask=attn_mask)
         x = self.norm1(x + attn_output)
 
         # Cross-attention: semantic_vector is [batch, hidden_dim]
@@ -316,13 +403,12 @@ class DiffusionDecoder(nn.Module):
         time_emb = self.time_emb(timestep)  # [batch, hidden_dim]
         x = x + time_emb.unsqueeze(1)  # [batch, seq_len, hidden_dim]
 
-        # Apply RoPE to query and key in each attention layer
-        # We need to apply RoPE during the attention computation
-        # For simplicity, we'll store the position info and apply in DecoderLayer
+        # Calculate RoPE embeddings for the current sequence length
+        cos, sin = self.rotary_emb(x, seq_len)
 
         # Pass through decoder layers
         for layer in self.layers:
-            x = layer(x, semantic_vector)
+            x = layer(x, semantic_vector, cos, sin)
 
         # Project to vocabulary logits
         logits = self.output_proj(x)  # [batch, seq_len, vocab_size]
@@ -357,8 +443,12 @@ if __name__ == "__main__":
     seq_len = 64
     x = torch.randn(batch_size, seq_len, 512)
     semantic_vector = torch.randn(batch_size, 512)
+    
+    # Need cos/sin for layer test
+    rope = RotaryEmbedding(dim=64, max_position_embeddings=64)
+    cos, sin = rope(x, seq_len)
 
-    output = layer(x, semantic_vector)
+    output = layer(x, semantic_vector, cos, sin)
     print(f"[OK] Forward pass successful")
     print(f"  Input shape: {x.shape}")
     print(f"  Output shape: {output.shape}")

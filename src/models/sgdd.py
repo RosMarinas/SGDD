@@ -66,14 +66,12 @@ class SGDDModel(nn.Module):
             hidden_dim=config.hidden_dim,
         )
 
-        # Get RoBERTa embeddings for decoder initialization
-        # Note: RoBERTa embeddings are 768-dim, need to project to hidden_dim
-        # We'll use the first hidden_dim dimensions as initialization
-        roberta = self.encoder.roberta
-        roberta_embeddings = roberta.embeddings.word_embeddings.weight.data
-        # Project from 768 to hidden_dim (512) by taking first 512 dimensions
-        roberta_embeddings_proj = roberta_embeddings[:, :config.hidden_dim]
-        # This is a simplification - in practice, you might want a proper projection
+        # Decoder Embedding Initialization
+        # We use random initialization for the decoder embeddings (by passing None).
+        # The network will learn its own representations during training.
+        # The connection between 768-dim Encoder and 512-dim Decoder is handled 
+        # by the learnable adapter (projection layer) in SemanticEncoder.
+        roberta_embeddings_proj = None
 
         # Diffusion decoder (trainable)
         self.decoder = DiffusionDecoder(
