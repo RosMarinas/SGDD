@@ -2,20 +2,28 @@
 
 支持Wikipedia和QQP数据集的加载、tokenization和批处理。
 """
-
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import RobertaTokenizer
 from datasets import load_dataset
 from typing import Dict, Optional, Tuple
 import random
+from pathlib import Path
+import os
+
+# ### 新增：导入 ModelScope 组件 ###
+
+from modelscope.msdatasets import MsDataset
+from modelscope.hub.snapshot_download import snapshot_download
+
+
+# 数据集缓存目录
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class WikipediaDataset(Dataset):
-    """Wikipedia文本重构数据集
-
-    任务: 输入文本 → 编码 → 解码 → 相同文本
-    """
+    """Wikipedia文本重构数据集"""
 
     def __init__(
         self,
@@ -25,30 +33,44 @@ class WikipediaDataset(Dataset):
         max_token_length: int = 64,
         split: str = "train",
     ):
-        """
-        Args:
-            num_samples: 使用样本数量
-            min_length: 最小文本长度(字符)
-            max_length: 最大文本长度(字符)
-            max_token_length: 最大token长度
-            split: train or validation
-        """
         self.num_samples = num_samples
         self.min_length = min_length
         self.max_length = max_length
         self.max_token_length = max_token_length
 
-        # 加载tokenizer
-        self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+        # ### 修改 1：从 ModelScope 下载并加载 Tokenizer ###
+        # 原始代码: self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base", ...)
+        print("Loading Tokenizer from ModelScope...")
+        try:
+            # 使用 ModelScope 上的 roberta-base 镜像
+            model_dir = snapshot_download('AI-ModelScope/roberta-base', cache_dir=str(DATA_DIR / "model_cache"))
+            self.tokenizer = RobertaTokenizer.from_pretrained(model_dir)
+        except Exception as e:
+            print(f"ModelScope tokenizer load failed: {e}")
+            # 回退尝试（如果本地有缓存）
+            self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+        
+        # ### 修改 2：使用 MsDataset 加载 Wikitext ###
+        print(f"Loading Wikipedia dataset ({split} split) from ModelScope...")
+        
+        # ModelScope 的 cache 机制由其内部管理，这里主要关注加载
+        # 对应 HF 的 wikitext-103-raw-v1
+        ms_ds = MsDataset.load(
+            'wikitext', 
+            subset_name='wikitext-103-raw-v1', 
+            split='train' ,
+            trust_remote_code=True# ModelScope 有时 split 命名习惯不同，但 wikitext 通常一致
+        )
+        
+        # 关键步骤：转换为 HuggingFace Dataset 对象，这样你后面的代码不用改
+        wiki_data = ms_ds.to_hf_dataset()
+        
+        print(f"Dataset loaded from ModelScope.")
 
-        # 加载数据集
-        print(f"Loading Wikipedia dataset ({split} split)...")
-        wiki_data = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
-
-        # 过滤和预处理
+        # 过滤和预处理 (原逻辑保持不变)
         self.samples = self._filter_and_preprocess(wiki_data, num_samples)
 
-        # 分割训练/验证集
+        # 分割训练/验证集 (原逻辑保持不变)
         if split == "validation":
             self.samples = self.samples[: int(len(self.samples) * 0.05)]
         else:
@@ -94,22 +116,18 @@ class WikipediaDataset(Dataset):
             return_tensors="pt",
         )
 
-        # 移除batch维度
         input_ids = encoded["input_ids"].squeeze(0)
         attention_mask = encoded["attention_mask"].squeeze(0)
 
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "text": text,  # 保存原始文本用于调试
+            "text": text,
         }
 
 
 class QQPDataset(Dataset):
-    """Quora Question Pairs改写数据集
-
-    任务: 输入问题A → 编码 → 解码 → 问题B(相同含义)
-    """
+    """Quora Question Pairs改写数据集"""
 
     def __init__(
         self,
@@ -118,25 +136,31 @@ class QQPDataset(Dataset):
         max_token_length: int = 64,
         split: str = "train",
     ):
-        """
-        Args:
-            num_samples: 使用样本数量
-            min_length: 最小问题长度(字符)
-            max_token_length: 最大token长度
-            split: train or validation
-        """
         self.num_samples = num_samples
         self.min_length = min_length
         self.max_token_length = max_token_length
 
-        # 加载tokenizer
-        self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+        # ### 修改 3：Tokenizer 同样改为从 ModelScope 加载 (或者复用上面的路径) ###
+        # 这里为了代码独立性再写一次，实际运行会自动使用缓存，不会重复下载
+        print("Loading Tokenizer...")
+        model_dir = snapshot_download('AI-ModelScope/roberta-base', cache_dir=str(DATA_DIR / "model_cache"))
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_dir)
 
-        # 加载数据集
-        print(f"Loading QQP dataset ({split} split)...")
-        qqp_data = load_dataset("quora", split="train")
+        # ### 修改 4：使用 MsDataset 加载 QQP ###
+        print(f"Loading QQP dataset ({split} split) from ModelScope...")
+        
+        # ModelScope 上 Quora 数据集通常叫 'quora' 或 'quora-qqp'
+        # 我们使用 'quora'，它对应 HF 的版本
+        ms_ds = MsDataset.load(
+            'quora', 
+            split='train'
+        )
+        
+        # 转换为 HF Dataset
+        qqp_data = ms_ds.to_hf_dataset()
+        print(f"Dataset loaded from ModelScope.")
 
-        # 过滤和预处理
+        # 过滤和预处理 (原逻辑保持不变)
         self.samples = self._filter_and_preprocess(qqp_data, num_samples)
 
         # 分割训练/验证集
@@ -152,18 +176,18 @@ class QQPDataset(Dataset):
         samples = []
 
         for item in dataset:
-            # 只选择标记为重复的问题对
+            # ### 注意：ModelScope 转换后的格式通常与 HF 一致，但以防万一可以打印 item 查看 ###
+            # 标准 HF QQP 结构: {'is_duplicate': int, 'questions': {'text': [str, str], ...}}
+            
             if item["is_duplicate"] != 1:
                 continue
 
             q1 = item["questions"]["text"][0].strip()
             q2 = item["questions"]["text"][1].strip()
 
-            # 过滤过短的问题
             if len(q1) < self.min_length or len(q2) < self.min_length:
                 continue
 
-            # 过滤完全相同的问题
             if q1 == q2:
                 continue
 
@@ -178,10 +202,8 @@ class QQPDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """获取单个样本"""
         q1, q2 = self.samples[idx]
 
-        # Tokenize两个问题
         encoded_q1 = self.tokenizer(
             q1,
             max_length=self.max_token_length,
@@ -198,7 +220,6 @@ class QQPDataset(Dataset):
             return_tensors="pt",
         )
 
-        # 移除batch维度
         return {
             "input_ids": encoded_q1["input_ids"].squeeze(0),
             "attention_mask_q1": encoded_q1["attention_mask"].squeeze(0),
@@ -208,9 +229,8 @@ class QQPDataset(Dataset):
             "text_q2": q2,
         }
 
-
+# Collate functions 和 get_dataloader 保持不变
 def collate_fn_wiki(batch: list) -> Dict[str, torch.Tensor]:
-    """Wikipedia数据集的collate函数"""
     input_ids = torch.stack([item["input_ids"] for item in batch])
     attention_mask = torch.stack([item["attention_mask"] for item in batch])
 
@@ -220,9 +240,7 @@ def collate_fn_wiki(batch: list) -> Dict[str, torch.Tensor]:
         "texts": [item["text"] for item in batch],
     }
 
-
 def collate_fn_qqp(batch: list) -> Dict[str, torch.Tensor]:
-    """QQP数据集的collate函数"""
     input_ids = torch.stack([item["input_ids"] for item in batch])
     attention_mask_q1 = torch.stack([item["attention_mask_q1"] for item in batch])
     target_ids = torch.stack([item["target_ids"] for item in batch])
@@ -237,7 +255,6 @@ def collate_fn_qqp(batch: list) -> Dict[str, torch.Tensor]:
         "texts_q2": [item["text_q2"] for item in batch],
     }
 
-
 def get_dataloader(
     dataset_name: str,
     split: str = "train",
@@ -246,20 +263,6 @@ def get_dataloader(
     pin_memory: bool = True,
     **dataset_kwargs,
 ) -> DataLoader:
-    """数据加载器工厂函数
-
-    Args:
-        dataset_name: 数据集名称 ('wikipedia' or 'qqp')
-        split: 'train' or 'validation'
-        batch_size: 批大小
-        num_workers: DataLoader worker数量
-        pin_memory: 是否固定内存
-        **dataset_kwargs: 传递给数据集的额外参数
-
-    Returns:
-        DataLoader对象
-    """
-    # 创建数据集
     if dataset_name == "wikipedia":
         dataset = WikipediaDataset(split=split, **dataset_kwargs)
         collate_fn = collate_fn_wiki
@@ -269,7 +272,6 @@ def get_dataloader(
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
-    # 创建DataLoader
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,

@@ -1,5 +1,5 @@
 """训练脚本
-
+HF_ENDPOINT=https://hf-mirror.com python src/train.py --config configs/phase1_wiki.yaml
 支持Wikipedia重构和QQP改写任务的训练,包含WandB日志、检查点保存、评估等功能。
 """
 
@@ -70,7 +70,7 @@ def train_epoch(
     total_loss = 0.0
     num_batches = 0
 
-    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}")
+    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
 
     # 梯度累积:只在循环开始时清零一次
     optimizer.zero_grad()
@@ -146,14 +146,14 @@ def train_epoch(
         # 更新进度条
         progress_bar.set_postfix({"loss": raw_loss})
 
-        # 日志记录
+        # 日志记录（按照epoch统计loss，仅在训练过程中用于监控）
         if (batch_idx + 1) % config.training.log_interval == 0:
-            avg_loss = total_loss / num_batches
+            avg_loss = total_loss / num_batches  # 当前epoch的平均loss
             step = epoch * len(dataloader) + batch_idx + 1
             if config.training.use_wandb:
                 wandb.log({
-                    "train/loss": avg_loss, # 这是当前Epoch的平均Loss
-                    "train/batch_loss": raw_loss, # 建议增加当前Batch的瞬时Loss
+                    "train/loss": avg_loss,  # 当前epoch的累计平均loss
+                    "train/batch_loss": raw_loss,  # 当前batch的瞬时loss
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                     "train/step": step,
                 })
@@ -367,10 +367,11 @@ def train(config: SGDDConfig, resume_from: Optional[str] = None) -> None:
             best_metric = val_loss
             save_best_model(
                 model,
-                -best_metric,  # 取负数因为save_best_model内部期望越大越好
+                best_metric,
                 "val_loss",
                 checkpoint_dir,
                 asdict(config) if hasattr(config, "__dict__") else vars(config),
+                metric_higher_is_better=False,  # loss越小越好
             )
             print(f"New best model saved with val_loss={best_metric:.4f}")
 

@@ -113,15 +113,17 @@ def save_best_model(
     metric_name: str,
     checkpoint_dir: str | Path,
     config: Dict[str, Any],
+    metric_higher_is_better: bool = True,
 ) -> None:
     """保存最佳模型
 
     Args:
         model: 模型
-        metric: 指标值 (越大越好)
+        metric: 指标值
         metric_name: 指标名称
         checkpoint_dir: 检查点目录
         config: 配置字典
+        metric_higher_is_better: True表示指标越大越好，False表示指标越小越好
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -142,8 +144,6 @@ def save_best_model(
     metrics_path = checkpoint_dir / "best_metrics.json"
     with open(metrics_path, "w") as f:
         json.dump({"best_metric": metric, "metric_name": metric_name}, f, indent=2)
-
-    print(f"Best model saved with {metric_name}={metric:.4f}")
 
 
 def load_best_model(
