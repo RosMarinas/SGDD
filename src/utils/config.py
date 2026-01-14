@@ -74,23 +74,35 @@ class DataConfig:
     """数据配置"""
 
     # 数据集选择
-    dataset: str = "wikipedia"  # wikipedia, qqp
+    dataset: str = "wikipedia"  # wikipedia, qqp, mixed
 
     # Wikipedia配置
     wiki_num_samples: int = 100000
     wiki_min_length: int = 20
-    wiki_max_length: int = 200
+    wiki_max_length: int = 128
 
     # QQP配置
     qqp_num_samples: int = 100000
     qqp_min_length: int = 10
+
+    # 混合数据配置
+    mixing_strategy: str = "none"  # "none" | "fast_validation" | "scale_up" | "full_scale"
+    total_samples: int = 100000
+
+    # Alpaca配置
+    alpaca_num_samples: int = 0
+    alpaca_min_length: int = 20
+
+    # OpenAssistant配置
+    oasst1_num_samples: int = 0
+    oasst1_min_length: int = 20
 
     # 数据加载
     num_workers: int = 4
     pin_memory: bool = True
 
     # 训练/验证分割
-    val_split: float = 0.05
+    val_split: float = 0.03
 
 
 @dataclass

@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "numpy>=1.24.0",
+    "numpy>=1.24.0,<2.0.0",
     "matplotlib>=3.7.0",
     "seaborn>=0.12.0",
     "tqdm>=4.65.0",
@@ -26,6 +26,12 @@ dependencies = [
     "accelerate>=0.24.0",
     "sentencepiece>=0.1.99",
     "nltk>=3.8.0",
+    "modelscope >=1.8.0",
+    "addict",
+    "oss2",
+    "datasets>=2.20.0",
+    "pyarrow>=14.0.0",
+
 ]
 
 [project.optional-dependencies]

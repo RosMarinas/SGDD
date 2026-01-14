@@ -12,7 +12,7 @@ model:
   num_layers: 6
   num_heads: 8
   ffn_dim: 2048
-  max_length: 256  # 对应 SGDDConfig 的 max_len
+  max_length: 128  # 对应 SGDDConfig 的 max_len
   dropout: 0.1  # 对应 SGDDConfig 的 dropout
 
   num_diffusion_steps: 1000
@@ -52,7 +52,7 @@ data:
 
   wiki_num_samples: 1000000
   wiki_min_length: 20
-  wiki_max_length: 256  # 与max_length保持一致
+  wiki_max_length: 128  # 与max_length保持一致
 
   num_workers: 4
   pin_memory: true

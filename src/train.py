@@ -259,6 +259,17 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
             "num_samples": config.data.qqp_num_samples,
             "min_length": config.data.qqp_min_length,
         }
+    elif config.data.dataset == "mixed":
+        # 混合数据集需要传递所有数据源的配置
+        dataset_kwargs = {
+            "wiki_num_samples": config.data.wiki_num_samples,
+            "wiki_min_length": config.data.wiki_min_length,
+            "wiki_max_length": config.data.wiki_max_length,
+            "alpaca_num_samples": config.data.alpaca_num_samples,
+            "alpaca_min_length": config.data.alpaca_min_length,
+            "oasst1_num_samples": config.data.oasst1_num_samples,
+            "oasst1_min_length": config.data.oasst1_min_length,
+        }
     else:
         raise ValueError(f"Unknown dataset: {config.data.dataset}")
 
