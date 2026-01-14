@@ -22,7 +22,7 @@ import wandb
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.sgdd import SGDDModel, SGDDConfig as ModelConfig
-from utils.config import SGDDConfig
+from utils.config import SGDDConfig as Config
 from utils.data import get_dataloader
 from utils.metrics import evaluate_generation, format_metrics
 from utils.checkpoints import save_checkpoint, load_checkpoint, save_best_model, cleanup_old_checkpoints
@@ -44,7 +44,7 @@ def train_epoch(
     optimizer: optim.Optimizer,
     scheduler: Optional[Any],
     device: torch.device,
-    config: SGDDConfig,
+    config: Config,
     epoch: int,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> Dict[str, float]:
@@ -163,7 +163,7 @@ def train_epoch(
     return {"loss": avg_loss}
 
 
-def train(config: SGDDConfig, resume_from: Optional[str] = None) -> None:
+def train(config: Config, resume_from: Optional[str] = None) -> None:
     """主训练函数
 
     Args:
@@ -211,13 +211,16 @@ def train(config: SGDDConfig, resume_from: Optional[str] = None) -> None:
     model_config = ModelConfig(
         encoder_model=config.model.encoder_name,
         hidden_dim=config.model.semantic_dim,
-        num_layers=config.model.decoder_layers,
-        num_heads=config.model.decoder_heads,
-        ffn_dim=config.model.decoder_ffn_dim,
+        num_layers=config.model.num_layers,
+        num_heads=config.model.num_heads,
+        ffn_dim=config.model.ffn_dim,
         max_len=config.model.max_length,
+        dropout=config.model.dropout,
         num_diffusion_steps=config.model.num_diffusion_steps,
         vocab_size=vocab_size,  # 从tokenizer动态获取
         cfg_prob=config.training.cfg_drop_prob,
+        use_self_conditioning=config.model.use_self_conditioning,
+        compute_pad_loss=config.model.compute_pad_loss,
     )
     model = SGDDModel(model_config).to(device)
 
@@ -417,7 +420,7 @@ def main():
     args = parser.parse_args()
 
     # 加载配置
-    config = SGDDConfig.from_yaml(args.config)
+    config = Config.from_yaml(args.config)
 
     # 开始训练
     train(config, resume_from=args.resume)

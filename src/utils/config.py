@@ -16,18 +16,22 @@ class ModelConfig:
     # 编码器配置
     encoder_name: str = "roberta-base"
     encoder_freeze: bool = True
-    semantic_dim: int = 512
+    semantic_dim: int = 512  # 对应 SGDDConfig 的 hidden_dim
 
-    # 解码器配置
-    decoder_layers: int = 6
-    decoder_hidden: int = 512
-    decoder_heads: int = 8
-    decoder_ffn_dim: int = 2048
-    max_length: int = 64
+    # 解码器配置 (字段名与 SGDDConfig 保持一致)
+    num_layers: int = 6  # 对应 SGDDConfig 的 num_layers
+    num_heads: int = 8  # 对应 SGDDConfig 的 num_heads
+    ffn_dim: int = 2048  # 对应 SGDDConfig 的 ffn_dim
+    max_length: int = 128  # 对应 SGDDConfig 的 max_len
+    dropout: float = 0.1  # 对应 SGDDConfig 的 dropout
 
     # 扩散配置
     num_diffusion_steps: int = 1000
     noise_schedule: str = "cosine"  # cosine, linear
+
+    # 训练优化配置 (字段名与 SGDDConfig 保持一致)
+    use_self_conditioning: bool = True  # 对应 SGDDConfig 的 use_self_conditioning
+    compute_pad_loss: bool = False  # 对应 SGDDConfig 的 compute_pad_loss
 
 
 @dataclass
@@ -171,9 +175,11 @@ class SGDDConfig:
         # 模型配置
         lines.append("\n[Model]")
         lines.append(f"  Encoder: {self.model.encoder_name} (frozen={self.model.encoder_freeze})")
-        lines.append(f"  Decoder: {self.model.decoder_layers} layers, {self.model.decoder_hidden} dim, {self.model.decoder_heads} heads")
+        lines.append(f"  Decoder: {self.model.num_layers} layers, {self.model.semantic_dim} dim, {self.model.num_heads} heads")
         lines.append(f"  Max Length: {self.model.max_length}")
         lines.append(f"  Diffusion Steps: {self.model.num_diffusion_steps}")
+        lines.append(f"  Self-Conditioning: {self.model.use_self_conditioning}")
+        lines.append(f"  Compute PAD Loss: {self.model.compute_pad_loss}")
 
         # 训练配置
         lines.append("\n[Training]")

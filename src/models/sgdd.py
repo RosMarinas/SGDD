@@ -68,12 +68,17 @@ class SGDDModel(nn.Module):
             hidden_dim=config.hidden_dim,
         )
 
-        # Decoder Embedding Initialization
-        # We use random initialization for the decoder embeddings (by passing None).
-        # The network will learn its own representations during training.
-        # The connection between 768-dim Encoder and 512-dim Decoder is handled 
-        # by the learnable adapter (projection layer) in SemanticEncoder.
-        roberta_embeddings_proj = None
+        # Decoder Embedding Initialization with Pretrained RoBERTa Weights
+        # CRITICAL: Initialize decoder embeddings with projected RoBERTa embeddings
+        # This provides:
+        # 1. Better convergence (start from good semantic representations)
+        # 2. Better rare token handling (pretrained knowledge)
+        # 3. Faster training (don't learn 50k+ embeddings from scratch)
+        roberta_embeddings_proj = self._project_roberta_embeddings(
+            self.encoder.roberta.embeddings.word_embeddings.weight,
+            source_dim=768,
+            target_dim=config.hidden_dim,
+        )
 
         # Diffusion decoder (trainable)
         self.decoder = DiffusionDecoder(
@@ -167,8 +172,10 @@ class SGDDModel(nn.Module):
         # [batch, seq_len, vocab_size]
 
         # Compute loss mask (use config setting for PAD loss)
+        # Pass attention_mask to exclude padding positions from loss computation
         loss_mask = self.diffusion.get_loss_weights(
             x_start, x_t, timestep,
+            attention_mask=attention_mask,
             compute_pad_loss=self.config.compute_pad_loss
         )
         # [batch, seq_len]
@@ -204,6 +211,46 @@ class SGDDModel(nn.Module):
         loss = (loss * loss_mask).sum() / loss_mask.sum()
 
         return loss
+
+    def _project_roberta_embeddings(
+        self,
+        roberta_embeddings: torch.Tensor,
+        source_dim: int = 768,
+        target_dim: int = 512,
+    ) -> torch.Tensor:
+        """
+        Project RoBERTa embeddings from source_dim to target_dim for decoder initialization.
+
+        Uses a simple linear projection (without bias) to preserve semantic structure
+        while reducing dimensionality. This is done once during initialization and
+        the projection matrix is discarded afterwards.
+
+        Args:
+            roberta_embeddings: RoBERTa word embeddings [vocab_size, source_dim]
+            source_dim: Source dimension (768 for RoBERTa-base)
+            target_dim: Target dimension (512 for decoder)
+
+        Returns:
+            projected_embeddings: Projected embeddings [vocab_size, target_dim]
+        """
+        device = roberta_embeddings.device
+
+        # Create a projection layer without bias
+        # Using Xavier initialization for better gradient flow
+        projection = nn.Linear(source_dim, target_dim, bias=False)
+        nn.init.xavier_uniform_(projection.weight)
+
+        # Move to same device as embeddings
+        projection = projection.to(device)
+
+        # Project embeddings: [vocab_size, source_dim] -> [vocab_size, target_dim]
+        with torch.no_grad():
+            projected_embeddings = projection(roberta_embeddings)
+
+        # Clean up: we don't need the projection layer anymore
+        del projection
+
+        return projected_embeddings
 
     @torch.no_grad()
     def generate(
@@ -274,17 +321,19 @@ class SGDDModel(nn.Module):
 
             # Conditional prediction (with semantic vector)
             logits_cond = self.decoder(current_tokens, semantic_vector_cond, timestep)
-            probs_cond = F.softmax(logits_cond / temperature, dim=-1)
+            # probs_cond = F.softmax(logits_cond / temperature, dim=-1)
             # [1, seq_len, vocab_size]
 
             # Unconditional prediction (without semantic vector)
             semantic_vector_uncond = torch.zeros_like(semantic_vector_cond)
             logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep)
-            probs_uncond = F.softmax(logits_uncond / temperature, dim=-1)
+            # probs_uncond = F.softmax(logits_uncond / temperature, dim=-1)
             # [1, seq_len, vocab_size]
 
             # Classifier-free guidance
-            probs = probs_cond + guidance_scale * (probs_cond - probs_uncond)
+            guided_logits = logits_uncond + guidance_scale * (logits_cond - logits_uncond)
+            probs = F.softmax(guided_logits / temperature, dim=-1)
+            #probs = probs_cond + guidance_scale * (probs_cond - probs_uncond)
             # [1, seq_len, vocab_size]
 
             # Sample tokens for masked positions

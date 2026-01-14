@@ -1,33 +1,38 @@
 # Phase 1 Configuration: Wikipedia Text Reconstruction
 # 任务: 输入文本 → 编码 → 解码 → 相同文本
-#HF_ENDPOINT=https://hf-mirror.com python src/train.py --config configs/phase1_wiki.yaml
+# HF_ENDPOINT=https://hf-mirror.com python src/train.py --config configs/phase1_wiki.yaml
 
 # 模型配置
 model:
   encoder_name: "roberta-base"
   encoder_freeze: true
-  semantic_dim: 768
+  semantic_dim: 512  # 对应 SGDDConfig 的 hidden_dim
 
-  decoder_layers: 6
-  decoder_hidden: 512
-  decoder_heads: 8
-  decoder_ffn_dim: 2048
-  max_length: 128
+  # Decoder 配置 (字段名与 SGDDConfig 保持一致)
+  num_layers: 6
+  num_heads: 8
+  ffn_dim: 2048
+  max_length: 256  # 对应 SGDDConfig 的 max_len
+  dropout: 0.1  # 对应 SGDDConfig 的 dropout
 
   num_diffusion_steps: 1000
   noise_schedule: "cosine"
 
+  # 训练优化配置 (字段名与 SGDDConfig 保持一致)
+  use_self_conditioning: true  # 启用self-conditioning提升质量
+  compute_pad_loss: false  # MaskGIT标准:只在MASK位置计算loss,不计算PAD
+
 # 训练配置
 training:
-  learning_rate: 0.0001
+  learning_rate: 0.0002  # 优化: 使用预训练embedding后可以提高学习率
   weight_decay: 0.01
-  batch_size: 128
+  batch_size: 64  # 优化: 降低batch_size以适应更大的序列长度(128)
   num_epochs: 30
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2  # 优化: 使用梯度累积来模拟更大batch(64*2=128)
   grad_clip: 1.0
 
   lr_scheduler: "cosine"
-  warmup_steps: 1000
+  warmup_steps: 2000  # 优化: 增加warmup步数以稳定训练
   use_fp16: true
   cfg_drop_prob: 0.1
 
@@ -47,7 +52,7 @@ data:
 
   wiki_num_samples: 1000000
   wiki_min_length: 20
-  wiki_max_length: 200
+  wiki_max_length: 256  # 与max_length保持一致
 
   num_workers: 4
   pin_memory: true
@@ -56,7 +61,7 @@ data:
 
 # 推理配置
 inference:
-  num_inference_steps: 256
+  num_inference_steps: 16  # 优化: MaskGIT通常16步足够,256步过高
   temperature: 1.0
   cfg_scale: 2.0
   sampling_strategy: "confidence"
