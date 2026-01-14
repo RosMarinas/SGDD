@@ -27,7 +27,7 @@ class SGDDConfig:
     num_layers: int = 6
     num_heads: int = 8
     ffn_dim: int = 2048
-    max_len: int = 64
+    max_len: int = 128  # Increased from 64 to 128 for better length learning
     dropout: float = 0.1
 
     # Diffusion
@@ -36,6 +36,8 @@ class SGDDConfig:
 
     # Training
     cfg_prob: float = 0.1  # Probability of unconditional training (CFG)
+    use_self_conditioning: bool = True  # Enable self-conditioning during training
+    compute_pad_loss: bool = False  # Compute loss on PAD positions (teaches model to output PAD)
 
 
 class SGDDModel(nn.Module):
@@ -107,7 +109,7 @@ class SGDDModel(nn.Module):
         cfg_uncond: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward pass through the model.
+        Forward pass through the model with AdaLN and optional self-conditioning.
 
         Args:
             input_ids: Input token IDs [batch, seq_len]
@@ -150,12 +152,25 @@ class SGDDModel(nn.Module):
         x_t = self.diffusion.q_sample(x_start, timestep)
         # [batch, seq_len]
 
-        # Decoder: predict clean tokens from noisy tokens
-        logits = self.decoder(x_t, semantic_vector, timestep)
+        # Self-conditioning: 50% probability during training (if enabled in config)
+        prev_pred = None
+        if self.training and self.config.use_self_conditioning:
+            use_sc = torch.rand(1).item() < 0.5
+            if use_sc:
+                with torch.no_grad():
+                    # Get previous prediction without self-conditioning
+                    prev_logits = self.decoder(x_t, semantic_vector, timestep, prev_pred=None)
+                    prev_pred = prev_logits.argmax(dim=-1)
+
+        # Decoder: predict clean tokens from noisy tokens (with optional self-conditioning)
+        logits = self.decoder(x_t, semantic_vector, timestep, prev_pred=prev_pred)
         # [batch, seq_len, vocab_size]
 
-        # Compute loss mask (only on tokens that were noised)
-        loss_mask = self.diffusion.get_loss_weights(x_start, x_t, timestep)
+        # Compute loss mask (use config setting for PAD loss)
+        loss_mask = self.diffusion.get_loss_weights(
+            x_start, x_t, timestep,
+            compute_pad_loss=self.config.compute_pad_loss
+        )
         # [batch, seq_len]
 
         return logits, x_start, loss_mask

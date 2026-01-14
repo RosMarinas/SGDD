@@ -1,10 +1,12 @@
 # 2-Issue:基于 AdaLN-Zero 与 Self-Conditioning 的单向量文本生成架构
 
+**状态**: ✅ 已解决 (2026-01-13)
+
 ## 1. 背景与现状 (Context)
 
 当前项目旨在使用单个全局语义向量 (Global Semantic Vector, $Z$) 来指导扩散模型重构或生成文本。
 
-目前的基准实现方案存在以下特征：
+以前的基准实现方案存在以下特征：
 
 - **Encoder**: 使用 Frozen RoBERTa + Mean Pooling 提取 $Z \in \mathbb{R}^{512}$。
 - **Conditioning**: 使用简单的 `Concat` 或 `Add` 将 $Z$ 注入到去噪网络中。
@@ -13,9 +15,9 @@
 
 ## 2. 问题陈述 (Problem Statement)
 
-当前的架构在处理“单向量 $\to$ 长序列”生成任务时存在三个核心痛点：
+以前的架构在处理"单向量 $\to$ 长序列"生成任务时存在三个核心痛点：
 
-1. **条件控制力弱 (Weak Conditioning)**: 简单的 `Concat` 使得全局语义信号随着网络层数加深被逐渐“稀释”，导致生成文本容易跑题或忽略语义约束。
+1. **条件控制力弱 (Weak Conditioning)**: 简单的 `Concat` 使得全局语义信号随着网络层数加深被逐渐"稀释"，导致生成文本容易跑题或忽略语义约束。
 2. **长度信息缺失 (Length Agnostic)**: 单个向量 $Z$ 丢失了序列长度信息。目前模型无法动态决定生成文本的长度，导致生成结果要么被截断，要么有过多的 Padding。
 3. **曝光偏差 (Exposure Bias)**: 训练时模型总是依赖真实的 $x_t$，而推理时必须依赖自身预测的（含有误差的）中间态。这导致长文本生成时容易出现语义崩坏或重复循环。
 
@@ -27,11 +29,11 @@
 
 #### A. 长度
 
-在扩散过程开始前，我们需要知道“画布”有多大。
+在扩散过程开始前，我们需要知道"画布"有多大。
 
 - 所有训练数据统一 `Padding` 到固定的 `MAX_LEN = 128`。
 - 确保词表中包含 `[EOS]` 和 `[PAD]`。
-- **关键点**：`Label` 中保留 `[PAD]`，**计算 Loss 时即使是 PAD 位置也要计算梯度**。这是教会模型“闭嘴”的唯一方式。
+- **关键点**：`Label` 中保留 `[PAD]`，**计算 Loss 时即使是 PAD 位置也要计算梯度**。这是教会模型"闭嘴"的唯一方式。
 
 #### B. 主干: DiT with AdaLN-Zero
 
@@ -52,7 +54,74 @@ $$\begin{aligned} \text{Condition} &= \text{MLP}([t, Z]) \rightarrow (\gamma, \b
   - 50% 概率: $x_{prev\_pred} = \emptyset$ (零向量)
   - 50% 概率: $x_{prev\_pred} = \text{StopGrad}(\text{Model}(x_t, \dots))$
 
-## 4. 预期指标与验证 (Validation)
+## 4. 实施方案 (Implementation)
+
+### 4.1 已完成的改动
+
+#### 1. 新增 `AdaLNModulator` 类 (`src/models/decoder.py`)
+
+```python
+class AdaLNModulator(nn.Module):
+    """将 [时间步, 语义向量] 映射为 AdaLN 参数"""
+    def __init__(self, hidden_dim: int = 512, num_layers: int = 6):
+        # MLP: [time_emb, Z] -> scale/shift parameters
+        self.mlp = nn.Sequential(...)
+        # Zero initialization for identity mapping at start
+```
+
+#### 2. 新增 `AdaLNDecoderLayer` 类 (`src/models/decoder.py`)
+
+```python
+class AdaLNDecoderLayer(nn.Module):
+    """使用 AdaLN 的 Decoder Layer，移除 Cross-Attention"""
+    def forward(self, x, ada_params, cos, sin):
+        # AdaLN: norm(x) * (1 + scale) + shift
+        scale1, shift1, scale2, shift2 = ada_params.unbind(dim=1)
+        ...
+```
+
+#### 3. 重构 `DiffusionDecoder` (`src/models/decoder.py`)
+
+- 添加 `AdaLNModulator`
+- 使用 `AdaLNDecoderLayer` 替换原有的 `DecoderLayer`
+- 添加 `prev_pred` 参数支持 Self-Conditioning
+- 移除时间步的加法注入（现在由 AdaLN 处理）
+
+#### 4. 修改 `SGDDModel.forward` (`src/models/sgdd.py`)
+
+- 添加 Self-Conditioning 训练逻辑（50% 概率）
+- 使用 `use_self_conditioning` 配置控制
+
+#### 5. 修改 `DiscreteDiffusion.get_loss_weights` (`src/models/diffusion.py`)
+
+- 添加 `compute_pad_loss` 参数
+- 支持对 PAD 位置计算 loss
+
+#### 6. 更新 `SGDDConfig` (`src/models/sgdd.py`)
+
+```python
+max_len: int = 128  # 从 64 增加到 128
+use_self_conditioning: bool = True
+compute_pad_loss: bool = False
+```
+
+### 4.2 架构对比
+
+| 组件 | 旧架构 | 新架构 (AdaLN-Zero) |
+|------|--------|---------------------|
+| 条件注入 | Cross-Attention | AdaLN (直接调制 LayerNorm) |
+| 时间步注入 | 加法 `x + time_emb` | AdaLN 一并调制 |
+| Self-Conditioning | 无 | 50% 训练概率 |
+| Zero Init | 无 | 有，加速收敛 |
+| PAD Loss | 仅 noised token | 可选全部位置 |
+
+### 4.3 文件修改清单
+
+- `src/models/decoder.py`: 添加 `AdaLNModulator`, `AdaLNDecoderLayer`，重构 `DiffusionDecoder`
+- `src/models/sgdd.py`: 修改 `SGDDConfig` 和 `SGDDModel.forward`
+- `src/models/diffusion.py`: 修改 `get_loss_weights` 支持 PAD loss
+
+## 5. 预期指标与验证 (Validation)
 
 我们将在验证集上监控以下指标来评估重构效果：
 
@@ -61,7 +130,7 @@ $$\begin{aligned} \text{Condition} &= \text{MLP}([t, Z]) \rightarrow (\gamma, \b
 3. **Repetition Rate (4-gram)**: 监控是否出现死循环（自条件化应能显著降低此指标）。
 4. **Length Error (MSE)**: 评估长度预测器的准确性。
 
-## 5. 参考文献 (References)
+## 6. 参考文献 (References)
 
 - **DiT**: *Scalable Diffusion Models with Transformers* (Peebles et al., ICCV 2023) - [AdaLN-Zero 来源]
 - **Bit Diffusion**: *Analog Bits: Generating Discrete Data using Diffusion Models* (Chen et al., ICLR 2023) - [Self-Conditioning 来源]

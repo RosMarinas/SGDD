@@ -218,6 +218,163 @@ class SinusoidalTimeEmbedding(nn.Module):
         return emb
 
 
+class AdaLNModulator(nn.Module):
+    """
+    AdaLN (Adaptive Layer Norm) Modulator with Zero Initialization.
+
+    Maps [timestep_embedding, semantic_vector] to AdaLN parameters (scale, shift)
+    for each decoder layer. Uses zero initialization for the last layer to enable
+    identity mapping at the start of training, which significantly speeds up convergence.
+
+    Based on: "Scalable Diffusion Models with Transformers" (DiT, Peebles et al., ICCV 2023)
+    """
+
+    def __init__(self, hidden_dim: int = 512, num_layers: int = 6):
+        """
+        Initialize AdaLN modulator.
+
+        Args:
+            hidden_dim: Hidden dimension
+            num_layers: Number of decoder layers
+        """
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        # MLP: [time_emb, Z] -> modulation parameters
+        # Input: hidden_dim * 2 (time + semantic vector)
+        # Output: num_layers * 4 * hidden_dim (scale/shift for 2 norms per layer)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim * 4),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * 4, num_layers * 4 * hidden_dim)
+        )
+
+        # Zero initialization for the last layer
+        # This makes each layer start as an identity mapping
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, time_emb: torch.Tensor, semantic_vector: torch.Tensor) -> torch.Tensor:
+        """
+        Compute AdaLN modulation parameters.
+
+        Args:
+            time_emb: Time embedding [batch, hidden_dim]
+            semantic_vector: Semantic vector Z [batch, hidden_dim]
+
+        Returns:
+            ada_params: Modulation parameters [batch, num_layers, 4, hidden_dim]
+                       4 = (scale1, shift1, scale2, shift2) for each layer
+        """
+        # Concatenate time and condition
+        cond = torch.cat([time_emb, semantic_vector], dim=-1)  # [batch, hidden_dim * 2]
+
+        # Generate modulation parameters
+        params = self.mlp(cond)  # [batch, num_layers * 4 * hidden_dim]
+
+        # Reshape to [batch, num_layers, 4, hidden_dim]
+        batch_size = params.shape[0]
+        params = params.view(batch_size, self.num_layers, 4, self.hidden_dim)
+
+        return params
+
+
+class AdaLNDecoderLayer(nn.Module):
+    """
+    Decoder layer with AdaLN (Adaptive Layer Normalization).
+
+    Replaces cross-attention with AdaLN modulation for stronger conditioning.
+    Each LayerNorm is modulated by scale and shift parameters computed from
+    [timestep, semantic_vector].
+
+    Architecture:
+    - Self-attention with RoPE
+    - AdaLN modulation (no cross-attention)
+    - Feed-forward network
+    - AdaLN modulation
+
+    Based on: "Scalable Diffusion Models with Transformers" (DiT)
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 512,
+        num_heads: int = 8,
+        ffn_dim: int = 2048,
+        dropout: float = 0.1,
+    ):
+        """
+        Initialize AdaLN decoder layer.
+
+        Args:
+            hidden_dim: Hidden dimension
+            num_heads: Number of attention heads
+            ffn_dim: Feed-forward network dimension
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.ffn_dim = ffn_dim
+
+        # Self-attention (bidirectional + RoPE)
+        self.self_attn = RoPESelfAttention(
+            hidden_dim, num_heads, dropout=dropout
+        )
+        # LayerNorm without affine parameters (will be modulated by AdaLN)
+        self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, ffn_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_dim, hidden_dim),
+            nn.Dropout(dropout),
+        )
+        # LayerNorm without affine parameters (will be modulated by AdaLN)
+        self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        ada_params: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass through AdaLN decoder layer.
+
+        Args:
+            x: Input tokens [batch, seq_len, hidden_dim]
+            ada_params: AdaLN parameters [batch, 4, hidden_dim]
+                       (scale1, shift1, scale2, shift2) for this layer
+            cos, sin: RoPE embeddings
+            attn_mask: Optional attention mask
+
+        Returns:
+            output: Processed tokens [batch, seq_len, hidden_dim]
+        """
+        # Unpack modulation parameters
+        scale1, shift1, scale2, shift2 = ada_params.unbind(dim=1)
+        # Each: [batch, hidden_dim]
+
+        # Self-attention with AdaLN
+        # y = LayerNorm(x) * (1 + scale) + shift
+        norm_x = self.norm1(x) * (1 + scale1.unsqueeze(1)) + shift1.unsqueeze(1)
+        attn_output = self.self_attn(norm_x, cos, sin, attn_mask=attn_mask)
+        x = x + attn_output
+
+        # Feed-forward network with AdaLN
+        norm_x = self.norm2(x) * (1 + scale2.unsqueeze(1)) + shift2.unsqueeze(1)
+        ffn_output = self.ffn(norm_x)
+        x = x + ffn_output
+
+        return x
+
+
 class DecoderLayer(nn.Module):
     """
     Single decoder layer with self-attention, cross-attention, and FFN.
@@ -226,6 +383,8 @@ class DecoderLayer(nn.Module):
     - Multi-head self-attention over tokens (with RoPE)
     - Multi-head cross-attention to semantic vector
     - Position-wise feed-forward network
+
+    DEPRECATED: Use AdaLNDecoderLayer instead.
     """
 
     def __init__(
@@ -310,10 +469,18 @@ class DecoderLayer(nn.Module):
 
 class DiffusionDecoder(nn.Module):
     """
-    Diffusion Decoder - 6-layer bidirectional transformer.
+    Diffusion Decoder with AdaLN-Zero architecture.
 
-    Takes noisy tokens and semantic vectors as input, predicts clean tokens.
-    Uses RoPE for position encoding and cross-attention for semantic conditioning.
+    Uses AdaLN (Adaptive Layer Normalization) for conditioning instead of
+    cross-attention. This provides stronger conditioning and better convergence.
+
+    Architecture:
+    - Token embeddings
+    - AdaLN modulator (computes scale/shift from [time, semantic_vector])
+    - N x AdaLNDecoderLayer (self-attention + AdaLN + FFN + AdaLN)
+    - Output projection with weight tying
+
+    Based on: "Scalable Diffusion Models with Transformers" (DiT)
     """
 
     def __init__(
@@ -328,7 +495,7 @@ class DiffusionDecoder(nn.Module):
         roberta_embeddings: Optional[torch.Tensor] = None,
     ):
         """
-        Initialize diffusion decoder.
+        Initialize diffusion decoder with AdaLN architecture.
 
         Args:
             vocab_size: Size of vocabulary
@@ -354,12 +521,15 @@ class DiffusionDecoder(nn.Module):
         # RoPE positional embeddings
         self.rotary_emb = RotaryEmbedding(hidden_dim // num_heads, max_position_embeddings=max_len)
 
-        # Time embedding
+        # Time embedding (sinusoidal)
         self.time_emb = SinusoidalTimeEmbedding(hidden_dim)
 
-        # Decoder layers
+        # AdaLN modulator: maps [time, semantic_vector] to layer parameters
+        self.modulator = AdaLNModulator(hidden_dim, num_layers)
+
+        # AdaLN decoder layers (no cross-attention)
         self.layers = nn.ModuleList([
-            DecoderLayer(hidden_dim, num_heads, ffn_dim, dropout)
+            AdaLNDecoderLayer(hidden_dim, num_heads, ffn_dim, dropout)
             for _ in range(num_layers)
         ])
 
@@ -380,14 +550,16 @@ class DiffusionDecoder(nn.Module):
         input_ids: torch.Tensor,
         semantic_vector: torch.Tensor,
         timestep: torch.Tensor,
+        prev_pred: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forward pass through decoder.
+        Forward pass through decoder with AdaLN.
 
         Args:
             input_ids: Input token IDs [batch, seq_len]
             semantic_vector: Semantic vector [batch, hidden_dim]
             timestep: Diffusion timestep [batch]
+            prev_pred: Optional previous prediction for self-conditioning [batch, seq_len]
 
         Returns:
             logits: Predicted logits [batch, seq_len, vocab_size]
@@ -397,18 +569,24 @@ class DiffusionDecoder(nn.Module):
 
         # Embed tokens
         x = self.token_emb(input_ids)  # [batch, seq_len, hidden_dim]
+
+        # Self-conditioning: add embedding of previous prediction
+        if prev_pred is not None:
+            prev_emb = self.token_emb(prev_pred)
+            x = x + prev_emb
+
         x = self.dropout(x)
 
-        # Add time embedding (broadcast to sequence length)
+        # Compute AdaLN modulation parameters from [time, semantic_vector]
         time_emb = self.time_emb(timestep)  # [batch, hidden_dim]
-        x = x + time_emb.unsqueeze(1)  # [batch, seq_len, hidden_dim]
+        ada_params = self.modulator(time_emb, semantic_vector)  # [batch, num_layers, 4, hidden_dim]
 
         # Calculate RoPE embeddings for the current sequence length
         cos, sin = self.rotary_emb(x, seq_len)
 
-        # Pass through decoder layers
-        for layer in self.layers:
-            x = layer(x, semantic_vector, cos, sin)
+        # Pass through AdaLN decoder layers
+        for i, layer in enumerate(self.layers):
+            x = layer(x, ada_params[:, i], cos, sin)
 
         # Project to vocabulary logits
         logits = self.output_proj(x)  # [batch, seq_len, vocab_size]
@@ -426,36 +604,41 @@ class DiffusionDecoder(nn.Module):
 
 if __name__ == "__main__":
     # Quick test
-    print("Testing DiffusionDecoder components...")
+    print("Testing DiffusionDecoder components with AdaLN...")
 
     # Test RotaryEmbedding
     print("\n1. Testing RotaryEmbedding...")
     rope = RotaryEmbedding(dim=64, max_position_embeddings=64)
     print("[OK] RotaryEmbedding initialized")
 
-    # Test DecoderLayer
-    print("\n2. Testing DecoderLayer...")
-    layer = DecoderLayer(hidden_dim=512, num_heads=8, ffn_dim=2048)
-    print("[OK] DecoderLayer initialized")
+    # Test AdaLNModulator
+    print("\n2. Testing AdaLNModulator...")
+    modulator = AdaLNModulator(hidden_dim=512, num_layers=6)
+    print("[OK] AdaLNModulator initialized")
+
+    # Test AdaLNDecoderLayer
+    print("\n3. Testing AdaLNDecoderLayer...")
+    layer = AdaLNDecoderLayer(hidden_dim=512, num_heads=8, ffn_dim=2048)
+    print("[OK] AdaLNDecoderLayer initialized")
 
     # Test forward pass
     batch_size = 2
     seq_len = 64
     x = torch.randn(batch_size, seq_len, 512)
-    semantic_vector = torch.randn(batch_size, 512)
-    
-    # Need cos/sin for layer test
+
+    # Need cos/sin and ada_params for layer test
     rope = RotaryEmbedding(dim=64, max_position_embeddings=64)
     cos, sin = rope(x, seq_len)
+    ada_params = torch.randn(batch_size, 4, 512)  # [batch, 4, hidden_dim]
 
-    output = layer(x, semantic_vector, cos, sin)
+    output = layer(x, ada_params, cos, sin)
     print(f"[OK] Forward pass successful")
     print(f"  Input shape: {x.shape}")
     print(f"  Output shape: {output.shape}")
     assert output.shape == (batch_size, seq_len, 512)
 
     # Test DiffusionDecoder
-    print("\n3. Testing DiffusionDecoder...")
+    print("\n4. Testing DiffusionDecoder with AdaLN...")
     decoder = DiffusionDecoder(
         vocab_size=50265,
         hidden_dim=512,
@@ -471,13 +654,21 @@ if __name__ == "__main__":
     print(f"  Total parameters: {num_params:,}")
     print(f"  Trainable parameters: {num_trainable:,}")
 
-    # Test forward pass
+    # Test forward pass without self-conditioning
     input_ids = torch.randint(0, 50265, (batch_size, seq_len))
+    semantic_vector = torch.randn(batch_size, 512)
     timestep = torch.randint(0, 1000, (batch_size,))
 
-    logits = decoder(input_ids, semantic_vector, timestep)
-    print(f"[OK] Forward pass successful")
+    logits = decoder(input_ids, semantic_vector, timestep, prev_pred=None)
+    print(f"[OK] Forward pass successful (without self-conditioning)")
     print(f"  Output shape: {logits.shape}")
     assert logits.shape == (batch_size, seq_len, 50265)
+
+    # Test forward pass with self-conditioning
+    prev_pred = torch.randint(0, 50265, (batch_size, seq_len))
+    logits_sc = decoder(input_ids, semantic_vector, timestep, prev_pred=prev_pred)
+    print(f"[OK] Forward pass successful (with self-conditioning)")
+    print(f"  Output shape: {logits_sc.shape}")
+    assert logits_sc.shape == (batch_size, seq_len, 50265)
 
     print("\n[SUCCESS] All tests passed!")

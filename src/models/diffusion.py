@@ -176,27 +176,31 @@ class DiscreteDiffusion:
         x_start: torch.Tensor,
         x_t: torch.Tensor,
         t: torch.Tensor,
+        compute_pad_loss: bool = False,
     ) -> torch.Tensor:
         """
         Compute weighting for each token in loss calculation.
-
-        Only compute loss on tokens that were actually noised (changed).
-        This improves efficiency by focusing learning on difficult tokens.
 
         Args:
             x_start: Original clean tokens [batch_size, seq_len]
             x_t: Noisy tokens [batch_size, seq_len]
             t: Timestep [batch_size]
+            compute_pad_loss: If True, compute loss on all positions including PAD.
+                              This teaches the model to output PAD tokens appropriately.
 
         Returns:
             loss_mask: Binary mask [batch_size, seq_len]
-                       1 for tokens that were noised, 0 otherwise
+                       1 for positions to compute loss, 0 otherwise
         """
-        # Tokens that changed are the ones we should predict
-        # These are where noise was applied (not kept)
-        mask = (x_t != x_start).float()
-
-        return mask
+        if compute_pad_loss:
+            # All positions contribute to loss (including PAD)
+            # This teaches the model when to output PAD/EOS tokens
+            return torch.ones_like(x_start.float(), device=x_start.device)
+        else:
+            # Only compute loss on tokens that were actually noised (changed)
+            # This improves efficiency by focusing learning on difficult tokens
+            mask = (x_t != x_start).float()
+            return mask
 
 
 if __name__ == "__main__":

@@ -15,11 +15,15 @@ class SemanticEncoder(nn.Module):
     Frozen semantic encoder using RoBERTa-base.
 
     Extracts semantic vectors from input text using mean pooling over
-    the final hidden states, then projects to the decoder dimension.
+    the final hidden states, then optionally projects to the decoder dimension.
+
+    If hidden_dim == 768 (RoBERTa's output dimension), the adapter is bypassed
+    for faster training. Otherwise, a learnable adapter is used to project
+    from 768 to the target dimension.
 
     Attributes:
         roberta: Frozen RoBERTa-base model
-        proj: Linear projection layer (768 -> hidden_dim)
+        adapter: Optional linear projection layer (768 -> hidden_dim)
         tokenizer: RoBERTa tokenizer (for convenience)
     """
 
@@ -34,6 +38,7 @@ class SemanticEncoder(nn.Module):
         Args:
             model_name: HuggingFace model name (default: "roberta-base")
             hidden_dim: Output dimension for semantic vector (default: 512)
+                        If set to 768, no adapter is used (faster training).
         """
         super().__init__()
 
@@ -44,21 +49,27 @@ class SemanticEncoder(nn.Module):
         for param in self.roberta.parameters():
             param.requires_grad = False
 
-        # Learnable Adapter: 768 (RoBERTa) -> hidden_dim (decoder)
-        # We use an MLP to better project the semantic space
-        self.adapter = nn.Sequential(
-            nn.Linear(768, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
-        )
-
         # Store tokenizer for convenience
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         # Store dimensions
         self.hidden_dim = hidden_dim
         self.output_dim = 768  # RoBERTa hidden size
+
+        # Optionally add adapter only if dimensions don't match
+        # This allows users to skip the projection for faster training
+        if hidden_dim != 768:
+            # Learnable Adapter: 768 (RoBERTa) -> hidden_dim (decoder)
+            # We use an MLP to better project the semantic space
+            self.adapter = nn.Sequential(
+                nn.Linear(768, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim)
+            )
+        else:
+            # Identity layer - bypass projection for faster training
+            self.adapter = nn.Identity()
 
     def forward(
         self,
