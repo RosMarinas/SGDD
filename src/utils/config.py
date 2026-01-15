@@ -18,6 +18,10 @@ class ModelConfig:
     encoder_freeze: bool = True
     semantic_dim: int = 512  # 对应 SGDDConfig 的 hidden_dim
 
+    # VIB配置
+    kl_weight: float = 0.001  # KL divergence weight
+    kl_anneal_steps: int = 10000  # KL annealing steps
+
     # 解码器配置 (字段名与 SGDDConfig 保持一致)
     num_layers: int = 6  # 对应 SGDDConfig 的 num_layers
     num_heads: int = 8  # 对应 SGDDConfig 的 num_heads
@@ -32,6 +36,7 @@ class ModelConfig:
     # 训练优化配置 (字段名与 SGDDConfig 保持一致)
     use_self_conditioning: bool = True  # 对应 SGDDConfig 的 use_self_conditioning
     compute_pad_loss: bool = False  # 对应 SGDDConfig 的 compute_pad_loss
+    compute_eos_loss: bool = True  # 对应 SGDDConfig 的 compute_eos_loss
 
 
 @dataclass

@@ -23,6 +23,8 @@ class SGDDConfig:
     # Encoder
     encoder_model: str = "roberta-base"
     hidden_dim: int = 512
+    kl_weight: float = 0.001  # KL divergence weight
+    kl_anneal_steps: int = 10000  # KL annealing steps
 
     # Decoder
     num_layers: int = 6
@@ -65,10 +67,12 @@ class SGDDModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # Semantic encoder (frozen)
+        # Semantic encoder (frozen) with Variational Information Bottleneck
         self.encoder = SemanticEncoder(
             model_name=config.encoder_model,
             hidden_dim=config.hidden_dim,
+            kl_weight=config.kl_weight,
+            kl_anneal_steps=config.kl_anneal_steps,
         )
 
         # Decoder Embedding Initialization with Pretrained RoBERTa Weights
@@ -115,7 +119,7 @@ class SGDDModel(nn.Module):
         attention_mask: torch.Tensor,
         timestep: Optional[torch.Tensor] = None,
         cfg_uncond: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass through the model with AdaLN and optional self-conditioning.
 
@@ -131,6 +135,7 @@ class SGDDModel(nn.Module):
             logits: Predicted logits [batch, seq_len, vocab_size]
             target_tokens: Target tokens for loss [batch, seq_len]
             loss_mask: Loss mask [batch, seq_len]
+            kl_loss: KL divergence [batch]
         """
         batch_size = input_ids.shape[0]
         device = input_ids.device
@@ -141,8 +146,12 @@ class SGDDModel(nn.Module):
             # Convert to discrete timestep
             timestep = (timestep * self.noise_schedule.num_timesteps).long()
 
-        # Extract semantic vector from encoder
-        semantic_vector = self.encoder(input_ids, attention_mask)
+        # Extract semantic vector from encoder with KL loss
+        semantic_vector, kl_loss = self.encoder(
+            input_ids,
+            attention_mask,
+            return_kl=True
+        )
         # [batch, hidden_dim]
 
         # Apply classifier-free guidance during training
@@ -185,24 +194,26 @@ class SGDDModel(nn.Module):
         )
         # [batch, seq_len]
 
-        return logits, x_start, loss_mask
+        return logits, x_start, loss_mask, kl_loss
 
     def compute_loss(
         self,
         logits: torch.Tensor,
         target_tokens: torch.Tensor,
         loss_mask: torch.Tensor,
+        kl_loss: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute masked cross-entropy loss.
+        Compute masked cross-entropy loss + KL divergence.
 
         Args:
             logits: Predicted logits [batch, seq_len, vocab_size]
             target_tokens: Target tokens [batch, seq_len]
             loss_mask: Loss mask [batch, seq_len]
+            kl_loss: KL divergence per sample [batch]
 
         Returns:
-            loss: Scalar loss
+            loss: Scalar loss (reconstruction + KL)
         """
         # Compute cross-entropy loss for each position
         loss = F.cross_entropy(
@@ -213,9 +224,13 @@ class SGDDModel(nn.Module):
         # [batch, seq_len]
 
         # Apply loss mask (only compute loss on noised tokens)
-        loss = (loss * loss_mask).sum() / loss_mask.sum()
+        recon_loss = (loss * loss_mask).sum() / loss_mask.sum()
 
-        return loss
+        # Add KL divergence (kl_loss is already weighted by kl_weight in encoder)
+        kl_loss_mean = kl_loss.mean()
+        total_loss = recon_loss + kl_loss_mean
+
+        return total_loss
 
     def _project_roberta_embeddings(
         self,
@@ -268,6 +283,7 @@ class SGDDModel(nn.Module):
         max_length: int = 64,
         repetition_penalty: float = 1.0,
         top_k: int = -1,
+        sample_z: bool = False,
     ) -> str | list[str]:
         """
         Generate text from semantic vector using MaskGIT-style decoding.
@@ -281,6 +297,7 @@ class SGDDModel(nn.Module):
             max_length: Maximum generation length
             repetition_penalty: Penalty for repeating tokens
             top_k: Only sample from top-k tokens (-1 = disabled)
+            sample_z: If True, sample z ~ N(mu, sigma) for stochastic inference. If False, use z=mu (deterministic).
 
         Returns:
             generated_text: Generated text or list of texts
@@ -310,8 +327,16 @@ class SGDDModel(nn.Module):
             )
             input_ids = encoded["input_ids"].to(device)
             attention_mask = encoded["attention_mask"].to(device)
-            
-            semantic_vector = self.encoder(input_ids, attention_mask)
+
+            if sample_z:
+                # Stochastic: temporarily enable training mode for sampling
+                was_training = self.encoder.training
+                self.encoder.train()
+                semantic_vector, _ = self.encoder(input_ids, attention_mask, return_kl=True)
+                self.encoder.train(was_training)
+            else:
+                # Deterministic: uses mu (default)
+                semantic_vector, _ = self.encoder(input_ids, attention_mask, return_kl=True)
         else:
             raise ValueError("Must provide either input_text or semantic_vector")
 

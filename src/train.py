@@ -68,6 +68,8 @@ def train_epoch(
     model.train()
 
     total_loss = 0.0
+    total_recon_loss = 0.0  # NEW: Track reconstruction separately
+    total_kl_loss = 0.0  # NEW: Track KL separately
     num_batches = 0
 
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
@@ -98,12 +100,15 @@ def train_epoch(
 
         # 统一的前向传播和反向传播
         with autocast:
-            logits, predicted_tokens, loss_mask = model(
+            # Forward pass: returns logits, target, loss_mask, kl_loss
+            logits, predicted_tokens, loss_mask, kl_loss = model(
                 semantic_input_ids,
                 semantic_attention_mask,
                 cfg_uncond=True,
             )
-            loss = model.compute_loss(logits, target_ids, loss_mask)
+
+            # Compute loss with KL divergence
+            loss = model.compute_loss(logits, target_ids, loss_mask, kl_loss)
             raw_loss = loss.item()
             # 梯度累积:loss除以累积步数以保持梯度尺度一致
             loss = loss / config.training.gradient_accumulation_steps
@@ -139,20 +144,28 @@ def train_epoch(
             # 清零梯度为下一次累积做准备
             optimizer.zero_grad()
 
-        # 记录损失
+        # Increment annealing step for KL divergence
+        model.encoder.increment_step()
+
+        # Track losses separately
         total_loss += raw_loss
+        kl_value = kl_loss.mean().item()
+        total_kl_loss += kl_value
         num_batches += 1
 
         # 更新进度条
-        progress_bar.set_postfix({"loss": raw_loss})
+        progress_bar.set_postfix({"loss": raw_loss, "kl": kl_value})
 
         # 日志记录（按照epoch统计loss，仅在训练过程中用于监控）
         if (batch_idx + 1) % config.training.log_interval == 0:
             avg_loss = total_loss / num_batches  # 当前epoch的平均loss
+            avg_kl = total_kl_loss / num_batches
             step = epoch * len(dataloader) + batch_idx + 1
             if config.training.use_wandb:
                 wandb.log({
                     "train/loss": avg_loss,  # 当前epoch的累计平均loss
+                    "train/reconstruction_loss": avg_loss - avg_kl,
+                    "train/kl_loss": avg_kl,
                     "train/batch_loss": raw_loss,  # 当前batch的瞬时loss
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                     "train/step": step,
@@ -160,7 +173,13 @@ def train_epoch(
 
     # 返回平均损失
     avg_loss = total_loss / num_batches
-    return {"loss": avg_loss}
+    avg_kl = total_kl_loss / num_batches
+
+    return {
+        "loss": avg_loss,
+        "reconstruction_loss": avg_loss - avg_kl,
+        "kl_loss": avg_kl,
+    }
 
 
 def train(config: Config, resume_from: Optional[str] = None) -> None:
@@ -221,6 +240,9 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         cfg_prob=config.training.cfg_drop_prob,
         use_self_conditioning=config.model.use_self_conditioning,
         compute_pad_loss=config.model.compute_pad_loss,
+        # VIB config
+        kl_weight=getattr(config.model, 'kl_weight', 0.001),
+        kl_anneal_steps=getattr(config.model, 'kl_anneal_steps', 10000),
     )
     model = SGDDModel(model_config).to(device)
 

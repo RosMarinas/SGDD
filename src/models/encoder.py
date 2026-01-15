@@ -31,14 +31,17 @@ class SemanticEncoder(nn.Module):
         self,
         model_name: str = "roberta-base",
         hidden_dim: int = 512,
+        kl_weight: float = 0.001,
+        kl_anneal_steps: int = 10000,
     ):
         """
-        Initialize the semantic encoder.
+        Initialize the semantic encoder with Variational Information Bottleneck.
 
         Args:
             model_name: HuggingFace model name (default: "roberta-base")
             hidden_dim: Output dimension for semantic vector (default: 512)
-                        If set to 768, no adapter is used (faster training).
+            kl_weight: Weight for KL divergence loss (default: 0.001)
+            kl_anneal_steps: Number of steps for KL annealing (default: 10000)
         """
         super().__init__()
 
@@ -56,35 +59,51 @@ class SemanticEncoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.output_dim = 768  # RoBERTa hidden size
 
-        # Optionally add adapter only if dimensions don't match
-        # This allows users to skip the projection for faster training
-        if hidden_dim != 768:
-            # Learnable Adapter: 768 (RoBERTa) -> hidden_dim (decoder)
-            # We use an MLP to better project the semantic space
-            self.adapter = nn.Sequential(
-                nn.Linear(768, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim)
-            )
-        else:
-            # Identity layer - bypass projection for faster training
-            self.adapter = nn.Identity()
+        # VIB parameters
+        self.kl_weight = kl_weight
+        self.kl_anneal_steps = kl_anneal_steps
+        self._current_step = 0  # For KL annealing
+
+        # Variational Information Bottleneck
+        # Two separate projections for mu and logvar
+        self.mu_layer = nn.Sequential(
+            nn.Linear(768, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        self.logvar_layer = nn.Sequential(
+            nn.Linear(768, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        # Initialize logvar to small values (near-deterministic start)
+        # This prevents posterior collapse at the beginning of training
+        for layer in self.logvar_layer:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                nn.init.zeros_(layer.bias)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        return_kl: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
-        Extract semantic vector from input text.
+        Extract semantic vector using Variational Information Bottleneck.
 
         Args:
             input_ids: Token IDs [batch_size, seq_len]
             attention_mask: Attention mask [batch_size, seq_len]
+            return_kl: If True, return (z, kl_loss)
 
         Returns:
-            semantic_vector: Projected semantic vector [batch_size, hidden_dim]
+            semantic_vector: Latent vector z ~ N(mu, sigma^2) [batch_size, hidden_dim]
+            kl_loss: KL divergence per sample [batch_size] (only if return_kl=True)
         """
         # Extract RoBERTa representations
         outputs = self.roberta(
@@ -109,10 +128,37 @@ class SemanticEncoder(nn.Module):
         # Compute mean: [batch_size, 768]
         mean_pooled = sum_hidden / token_counts
 
-        # Project to decoder dimension using the learnable adapter: [batch_size, hidden_dim]
-        semantic_vector = self.adapter(mean_pooled)
+        # Variational Information Bottleneck
+        mu = self.mu_layer(mean_pooled)  # [batch_size, hidden_dim]
+        logvar = self.logvar_layer(mean_pooled)  # [batch_size, hidden_dim]
 
-        return semantic_vector
+        # Clamp logvar for stability (prevent extreme values)
+        logvar = torch.clamp(logvar, min=-10, max=2)
+
+        # KL annealing: gradually increase KL weight over training
+        if self.training:
+            anneal_ratio = min(1.0, self._current_step / self.kl_anneal_steps)
+            current_kl_weight = self.kl_weight * anneal_ratio
+        else:
+            current_kl_weight = self.kl_weight
+
+        # Reparameterization trick: z = mu + sigma * epsilon
+        if self.training:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            z = mu + std * eps  # [batch_size, hidden_dim]
+        else:
+            # Inference: use mu (deterministic)
+            z = mu
+
+        # KL divergence: D_KL(N(mu, sigma^2) || N(0, 1))
+        # = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+        kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+        kl_weighted = kl_per_sample * current_kl_weight  # [batch_size]
+
+        if return_kl:
+            return z, kl_weighted
+        return z
 
     def get_tokenizer(self) -> AutoTokenizer:
         """Return the tokenizer for external use."""
@@ -164,6 +210,11 @@ class SemanticEncoder(nn.Module):
             semantic_vector: [batch_size, hidden_dim]
         """
         return self.forward(input_ids, attention_mask)
+
+    def increment_step(self):
+        """Increment step counter for KL annealing (call each training step)"""
+        if self.training:
+            self._current_step += 1
 
 
 if __name__ == "__main__":
