@@ -183,6 +183,8 @@ class DiscreteDiffusion:
         t: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         compute_pad_loss: bool = False,
+        compute_eos_loss: bool = True,
+        eos_token_id: int = 2,
     ) -> torch.Tensor:
         """
         Compute weighting for each token in loss calculation.
@@ -196,6 +198,10 @@ class DiscreteDiffusion:
             compute_pad_loss: If True, compute loss on all positions including PAD.
                               This teaches the model to output PAD tokens appropriately.
                               **Recommended: False for MaskGIT-style training**
+            compute_eos_loss: If True, always include EOS token positions in loss.
+                             This teaches the model to predict EOS at the end of sequences.
+                             **Recommended: True for variable-length output**
+            eos_token_id: Token ID for EOS (default: 2 for RoBERTa)
 
         Returns:
             loss_mask: Binary mask [batch_size, seq_len]
@@ -207,14 +213,15 @@ class DiscreteDiffusion:
               (tokens that were replaced), excluding padding
             - compute_pad_loss=True: Compute loss everywhere including PAD
               (useful if you want model to learn when to output PAD)
+            - compute_eos_loss=True (recommended): Always include EOS positions
+              to teach model when to stop generating
         """
         if compute_pad_loss:
             # All positions contribute to loss (including PAD)
-            # This teaches the model when to output PAD/EOS tokens
-            return torch.ones_like(x_start.float(), device=x_start.device)
+            base_mask = torch.ones_like(x_start.float(), device=x_start.device)
         else:
             # MaskGIT-style: Only compute loss on tokens that were noised (changed to MASK)
-            noised_mask = (x_t != x_start).float()
+            base_mask = (x_t != x_start).float()
 
             # Exclude padding positions from loss computation
             # attention_mask=1 means real token, attention_mask=0 means padding
@@ -223,9 +230,15 @@ class DiscreteDiffusion:
                 #           1 * 0 = 0 (real token but not noised -> no loss)
                 #           0 * 1 = 0 (padding token -> no loss)
                 #           0 * 0 = 0 (padding & not noised -> no loss)
-                noised_mask = noised_mask * attention_mask
+                base_mask = base_mask * attention_mask
 
-            return noised_mask
+        # Always include EOS token positions in loss
+        if compute_eos_loss:
+            eos_positions = (x_start == eos_token_id).float()
+            # Union of base_mask and eos_positions
+            base_mask = torch.clamp(base_mask + eos_positions, min=0, max=1)
+
+        return base_mask
 
 
 if __name__ == "__main__":

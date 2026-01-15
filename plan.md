@@ -1,6 +1,28 @@
 # 实施计划：Semantic-Guided Discrete Diffusion (SGDD) 模型
 
-## 当前进度 (截至 2026-01-11)
+## 当前进度 (截至 2026-01-15)
+
+### 🔧 最新修复: Inference Bug (2026-01-15)
+
+**问题**: WikiText训练的模型推理结果很差 (ppl=3.9但生成完全乱码)
+
+**根本原因**:
+1. **倒置的CFG公式** (sgdd.py:334) - 导致模型忽略语义向量
+2. **缺少Self-Conditioning** - 推理时未使用,造成训练-推理不匹配
+3. **评估绕过generate()** - 验证ppl不能反映真实推理性能
+
+**已修复**:
+- ✅ 修正CFG公式: `logits_cond + scale * (logits_cond - logits_uncond)`
+- ✅ 添加self-conditioning到推理循环
+- ✅ 添加诊断日志验证修复
+
+**测试结果**: 使用checkpoints/4 (val_loss=2.07)测试,CFG修复成功但模型仍需训练
+
+详见下方"Inference Bug修复总结"章节
+
+---
+
+## 历史进度 (截至 2026-01-11)
 
 ### ✅ 已完成阶段
 
@@ -554,5 +576,338 @@ SGDD/
 - Phase 2: 生成有意义的改写（BLEU > 0.4）
 - 推理速度: < 4秒/生成
 - 训练稳定性: Loss平滑下降
+
+---
+
+## EOS Token支持实现 (2026-01-15)
+
+### 需求背景
+
+当前模型无法处理变长输入/输出,需要像LLaDA一样设计:
+- 让模型学会输出EOS (End of Sequence) token
+- 通过后处理截取EOS之前的部分
+- 实现真正的变长输出能力
+
+### 实现方案
+
+采用LLaDA的方法,结合RoBERTa encoder的特点:
+
+#### 关键洞察
+
+**RoBERTa tokenizer自动添加EOS token**:
+- 输入: "Hello world"
+- Tokenized: `[0, 31414, 232, 2, 1, 1, ...]` = `[<s>, Hello, world, </s>, <pad>, <pad>, ...]`
+- EOS token (`</s>`, ID=2) 已经存在于训练数据中!
+
+**当前问题**:
+- 模型只在MASK位置计算loss,很少在EOS位置计算loss
+- 模型从未学会何时/何地输出EOS
+- 虽然后处理会截断EOS,但模型几乎不生成EOS
+
+#### 解决方案
+
+修改损失计算,**始终包含EOS token位置**在损失计算中:
+
+```python
+# src/models/diffusion.py - get_loss_weights方法
+if compute_eos_loss:
+    eos_positions = (x_start == eos_token_id).float()
+    # 取并集: base_mask ∪ eos_positions
+    base_mask = torch.clamp(base_mask + eos_positions, min=0, max=1)
+```
+
+这样确保:
+1. EOS tokens总是包含在loss计算中
+2. 模型学会在序列末尾预测EOS
+3. 即使EOS token没有被noise也会被训练
+
+### 已实施的修改
+
+#### 1. 损失计算修改 (`src/models/diffusion.py:179-241`)
+
+添加新参数:
+- `compute_eos_loss: bool = True` - 启用EOS token学习
+- `eos_token_id: int = 2` - RoBERTa的EOS token ID
+
+修改逻辑:
+```python
+# 始终包含EOS token位置在loss中
+if compute_eos_loss:
+    eos_positions = (x_start == eos_token_id).float()
+    base_mask = torch.clamp(base_mask + eos_positions, min=0, max=1)
+```
+
+#### 2. 模型配置更新 (`src/models/sgdd.py:20-43`)
+
+添加新配置字段:
+```python
+compute_eos_loss: bool = True  # 计算EOS位置的loss
+eos_token_id: int = 2  # RoBERTa EOS token ID
+```
+
+更新forward pass (line 177-186):
+```python
+loss_mask = self.diffusion.get_loss_weights(
+    x_start, x_t, timestep,
+    attention_mask=attention_mask,
+    compute_pad_loss=self.config.compute_pad_loss,
+    compute_eos_loss=self.config.compute_eos_loss,
+    eos_token_id=self.config.eos_token_id
+)
+```
+
+#### 3. 配置文件更新 (`configs/phase1_mixed_validation.yaml`)
+
+添加配置项:
+```yaml
+compute_eos_loss: true  # 启用EOS token学习,支持变长输出
+```
+
+#### 4. 测试脚本 (`temp/test_eos_support.py`)
+
+创建测试脚本验证EOS支持:
+- 测试RoBERTa tokenizer行为 (验证EOS自动添加)
+- 使用checkpoints/4测试当前模型的EOS生成能力
+- 记录EOS生成率和位置
+
+### 测试结果
+
+使用checkpoints/4 (WikiText训练, val_loss=2.07)测试:
+
+**当前模型行为 (未启用compute_eos_loss训练)**:
+- EOS生成率: **20%** (1/5测试)
+- 大部分输出达到max_length=64
+- 模型并未学会生成EOS token
+
+**示例输出**:
+```
+Test 1: "Hello world" → "ground world transmit meter world Olympus" (6 tokens, EOS生成)
+Test 2: "The quick brown fox..." → "pit pit the pit top tiger..." (64 tokens, 无EOS)
+Test 3: "Machine learning..." → "inary capable health capable..." (64 tokens, 无EOS)
+```
+
+**RoBERTa Tokenizer验证**:
+```
+Input: "Hello world"
+Tokenized: [<s>, Hello, world, </s>, <pad>, <pad>, ...]
+Position 3: ID=2 (</s>) ← EOS token已存在
+```
+
+### 预期效果
+
+启用`compute_eos_loss=True`训练后:
+
+**训练变化**:
+1. Loss会包含EOS位置 → 绝对loss值略高
+2. 模型学会在序列末尾预测EOS
+3. 收敛可能稍慢 (更多loss需要优化)
+
+**生成改进**:
+1. 更频繁的EOS token生成
+2. 变长输出 (不总是max_length)
+3. 更好的长度控制
+4. 自然的结尾位置
+
+**成功指标**:
+- EOS生成率: > 80%
+- 位置准确性: EOS出现在原始文本长度±5 tokens内
+- 质量指标: BLEU/Exact Match保持或改进
+
+### 下一步行动
+
+1. ✅ 代码修改已完成
+2. ✅ 测试脚本已创建并验证当前基线
+3. ⏳ **使用新配置训练模型**:
+   ```bash
+   # 选项A: 从checkpoints/4继续训练
+   uv run python src/train.py \
+       --config configs/phase1_mixed_validation.yaml \
+       --resume checkpoints/4/best_model.pt
+
+   # 选项B: 从头训练
+   uv run python src/train.py \
+       --config configs/phase1_mixed_validation.yaml
+   ```
+4. ⏳ 训练后重新测试EOS生成率
+5. ⏳ 监控验证指标确认质量不下降
+
+### 技术细节
+
+#### 为什么有效
+
+1. **数据**: RoBERTa已经为所有训练样本添加EOS tokens
+2. **训练**: 通过包含EOS位置在loss中,模型学会预测它们
+3. **推理**: 现有的后处理已经在第一个EOS处截断
+4. **结果**: 模型学会自然的停止点
+
+#### 设计决策
+
+1. **使用mask的并集**: 包含noised位置和EOS位置
+   - 原因: 确保即使未被noise也会训练EOS
+   - 考虑的替代方案: 仅EOS loss (拒绝 - 失去上下文)
+
+2. **不修改数据管道**: EOS tokens已存在
+   - 原因: 更简单,利用RoBERTa的行为
+   - 考虑的替代方案: 手动添加EOS (拒绝 - 冗余)
+
+3. **简单截断后处理**: 保持现有逻辑
+   - 原因: 已实现且正确
+   - 考虑的替代方案: 复杂验证 (拒绝 - 过度设计)
+
+### 修改的文件清单
+
+1. ✅ `src/models/diffusion.py` (lines 179-241) - 添加EOS loss参数和逻辑
+2. ✅ `src/models/sgdd.py` (lines 20-43, 177-186) - 更新配置和forward pass
+3. ✅ `configs/phase1_mixed_validation.yaml` (line 24) - 启用EOS loss
+4. ✅ `temp/test_eos_support.py` (NEW) - 创建测试脚本
+
+### 时间戳
+
+- 2026-01-15: 实现EOS token支持
+- 测试显示当前checkpoint未训练EOS生成
+- 准备使用新配置重新训练
+
+---
+
+## Inference Bug修复总结
+
+### 问题发现
+
+用户报告在WikiText数据集训练的模型推理结果很差:
+- Val perplexity: 3.9 (很好)
+- 但生成结果完全是乱码,有大量重复token
+- Exact match: 0.0
+- BLEU分数接近0
+
+### 根本原因分析
+
+经过深入代码分析,发现了**两个关键bug**:
+
+#### Bug 1: 倒置的CFG公式 (src/models/sgdd.py:334)
+
+**原代码 (错误)**:
+```python
+guided_logits = logits_uncond + guidance_scale * (logits_cond - logits_uncond)
+```
+
+**修复后**:
+```python
+guided_logits = logits_cond + guidance_scale * (logits_cond - logits_uncond)
+```
+
+**影响**: 原公式在guidance_scale > 0时会将预测**推离**条件预测(有语义引导),导致模型忽略输入的语义向量。
+
+#### Bug 2: 推理时缺少Self-Conditioning
+
+**训练行为** (src/models/sgdd.py:160-169):
+- 50%概率使用self-conditioning
+- 前一步预测作为prev_pred传入decoder
+
+**推理行为** (修复前):
+- 从不使用self-conditioning
+- prev_pred=None始终传入
+
+**影响**: 训练-推理不匹配,降低生成质量。
+
+#### Bug 3: 评估绕过了generate()方法
+
+**发现**: src/evaluate.py:77-78 直接调用decoder而不是generate(),因此验证perplexity不能反映真实推理性能。这解释了为什么ppl=3.9但生成很烂。
+
+### 已实施的修复
+
+1. ✅ 修复CFG公式 (sgdd.py:346)
+2. ✅ 添加self-conditioning到推理 (sgdd.py:322-326, 335, 341)
+3. ✅ 添加诊断日志 (sgdd.py:295-299, 351-355)
+
+### 测试结果
+
+使用checkpoints/4 (val_loss=2.07)测试:
+
+**CFG Scale = 0.0** (无CFG):
+```
+Input:  -John M Harrel Telegram , January 31 , 1861...
+Output: , Emson ,ason , , , grade , , Simon , , January 60 Garrison...
+```
+
+**CFG Scale = 1.0**:
+```
+Input:  -John M Harrel Telegram , January 31 , 1861...
+Output: asonason 1861 , Simson Sasonason sason January Januaryason...
+```
+
+**CFG Scale = 2.0**:
+```
+Input:  -John M Harrel Telegram , January 31 , 1861...
+Output: asonason SARason January January volason January 1861asonason SARason...
+```
+
+### 观察到的问题
+
+1. **CFG修复成功**: debug输出显示guided_logits正确放大了条件预测
+2. **Self-conditioning添加成功**: 代码正确使用prev_pred
+3. **但仍有重复token问题**: 输出仍包含大量重复模式 ("asonason", "905905")
+
+### 可能原因
+
+1. **模型训练不足**: checkpoints/4的val_loss=2.07还比较高,可能需要更多训练
+2. **超参数不优**: 可能需要调整temperature、num_steps等
+3. **模型容量**: semantic_dim=128较小,可能限制表达能力
+
+### 下一步建议
+
+1. **使用更好的checkpoint**: checkpoints/3 (val_loss=1.37)可能表现更好
+2. **继续训练**: 当前模型可能没有充分收敛
+3. **调整超参数**:
+   - 尝试更低的temperature (0.7-0.9)
+   - 尝试更多的inference steps (24-32)
+   - 尝试不同的guidance_scale (0.5-1.5)
+4. **评估改进**: 修改evaluate.py使用generate()方法进行真实推理评估
+
+### 修改的文件清单
+
+- `src/models/sgdd.py:295-299` - 添加semantic_vector诊断日志
+- `src/models/sgdd.py:322-326` - 添加self-conditioning准备
+- `src/models/sgdd.py:335` - 条件预测使用prev_pred
+- `src/models/sgdd.py:341` - 无条件预测使用prev_pred
+- `src/models/sgdd.py:346` - 修复CFG公式 (关键修复!)
+- `src/models/sgdd.py:351-355` - 添加第一步诊断日志
+- `temp/test_inference_fix.py` - 创建测试脚本
+
+### 关键代码变更
+
+#### 1. CFG公式修复 (src/models/sgdd.py:346)
+
+```python
+# Before (WRONG):
+guided_logits = logits_uncond + guidance_scale * (logits_cond - logits_uncond)
+
+# After (CORRECT):
+guided_logits = logits_cond + guidance_scale * (logits_cond - logits_uncond)
+```
+
+#### 2. Self-Conditioning添加 (src/models/sgdd.py:322-326)
+
+```python
+# Prepare self-conditioning from previous step
+prev_pred = None
+if step_idx > 0:
+    # Use previous iteration's tokens as self-conditioning
+    prev_pred = current_tokens.clone()
+```
+
+#### 3. 修改decoder调用 (src/models/sgdd.py:335, 341)
+
+```python
+# Conditional prediction with self-conditioning
+logits_cond = self.decoder(current_tokens, semantic_vector_cond, timestep, prev_pred=prev_pred)
+
+# Unconditional prediction with self-conditioning
+logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep, prev_pred=prev_pred)
+```
+
+### 时间戳
+
+- 2026-01-15: 发现并修复CFG bug和self-conditioning缺失
+- 测试使用checkpoints/4,观察到修复成功但模型仍需训练
 
 ---

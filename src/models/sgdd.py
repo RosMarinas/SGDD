@@ -8,6 +8,7 @@ into a complete model for text generation.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from typing import Optional, Tuple
 from dataclasses import dataclass
 
@@ -38,6 +39,8 @@ class SGDDConfig:
     cfg_prob: float = 0.1  # Probability of unconditional training (CFG)
     use_self_conditioning: bool = True  # Enable self-conditioning during training
     compute_pad_loss: bool = False  # Compute loss on PAD positions (teaches model to output PAD)
+    compute_eos_loss: bool = True  # Compute loss on EOS positions (teaches model to output EOS)
+    eos_token_id: int = 2  # RoBERTa EOS token ID
 
 
 class SGDDModel(nn.Module):
@@ -171,12 +174,14 @@ class SGDDModel(nn.Module):
         logits = self.decoder(x_t, semantic_vector, timestep, prev_pred=prev_pred)
         # [batch, seq_len, vocab_size]
 
-        # Compute loss mask (use config setting for PAD loss)
+        # Compute loss mask with EOS support
         # Pass attention_mask to exclude padding positions from loss computation
         loss_mask = self.diffusion.get_loss_weights(
             x_start, x_t, timestep,
             attention_mask=attention_mask,
-            compute_pad_loss=self.config.compute_pad_loss
+            compute_pad_loss=self.config.compute_pad_loss,
+            compute_eos_loss=self.config.compute_eos_loss,
+            eos_token_id=self.config.eos_token_id
         )
         # [batch, seq_len]
 
@@ -260,6 +265,8 @@ class SGDDModel(nn.Module):
         guidance_scale: float = 2.0,
         temperature: float = 1.0,
         max_length: int = 64,
+        repetition_penalty: float = 1.0,  # Default: no penalty
+        top_k: int = -1,  # -1 = no top-k filtering
     ) -> str:
         """
         Generate text from semantic vector using MaskGIT-style decoding.
@@ -270,6 +277,8 @@ class SGDDModel(nn.Module):
             guidance_scale: CFG guidance scale
             temperature: Sampling temperature
             max_length: Maximum generation length
+            repetition_penalty: Penalty for repeating tokens (1.0 = no penalty, 1.2 = mild, 1.5 = strong)
+            top_k: Only sample from top-k tokens (-1 = disabled, 50 = recommended)
 
         Returns:
             generated_text: Generated text
@@ -292,6 +301,12 @@ class SGDDModel(nn.Module):
         semantic_vector_cond = self.encoder(input_ids, attention_mask)
         # [1, hidden_dim]
 
+        # Debug logging
+        print(f"[DEBUG] semantic_vector: mean={semantic_vector_cond.mean():.4f}, "
+              f"std={semantic_vector_cond.std():.4f}, "
+              f"device={semantic_vector_cond.device}")
+        print(f"[DEBUG] guidance_scale={guidance_scale}, temperature={temperature}, num_steps={num_steps}")
+
         # Start from all MASK tokens
         mask_token_id = self.tokenizer.mask_token_id
         current_tokens = torch.full(
@@ -313,28 +328,53 @@ class SGDDModel(nn.Module):
                 device=device,
             )
 
+            # Prepare self-conditioning from previous step
+            prev_pred = None
+            if step_idx > 0:
+                # Use previous iteration's tokens as self-conditioning
+                prev_pred = current_tokens.clone()
+
             # Number of tokens to unmask at this step
             # Cosine schedule: more tokens in early steps
             num_masked = (current_tokens == mask_token_id).sum().item()
             num_to_unmask = int((1 - t) * num_masked / 2)
             num_to_unmask = max(1, num_to_unmask)
 
-            # Conditional prediction (with semantic vector)
-            logits_cond = self.decoder(current_tokens, semantic_vector_cond, timestep)
+            # Conditional prediction (with semantic vector and self-conditioning)
+            logits_cond = self.decoder(current_tokens, semantic_vector_cond, timestep, prev_pred=prev_pred)
             # probs_cond = F.softmax(logits_cond / temperature, dim=-1)
             # [1, seq_len, vocab_size]
 
-            # Unconditional prediction (without semantic vector)
+            # Unconditional prediction (without semantic vector, with self-conditioning)
             semantic_vector_uncond = torch.zeros_like(semantic_vector_cond)
-            logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep)
+            logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep, prev_pred=prev_pred)
             # probs_uncond = F.softmax(logits_uncond / temperature, dim=-1)
             # [1, seq_len, vocab_size]
 
-            # Classifier-free guidance
-            guided_logits = logits_uncond + guidance_scale * (logits_cond - logits_uncond)
+            # Classifier-free guidance (FIXED: correct formula)
+            guided_logits = logits_cond + guidance_scale * (logits_cond - logits_uncond)
+
+            # Apply repetition penalty to prevent token loops
+            if repetition_penalty > 1.0:
+                # Count token frequencies in current generated sequence
+                unique_tokens, counts = torch.unique(
+                    current_tokens[current_tokens != mask_token_id],
+                    return_counts=True
+                )
+                # Penalize tokens that have already appeared
+                for token, count in zip(unique_tokens, counts):
+                    # Logit-space penalty: multiply by 1/repetition_penalty^count
+                    guided_logits[:, :, token] /= (repetition_penalty ** count)
+
             probs = F.softmax(guided_logits / temperature, dim=-1)
             #probs = probs_cond + guidance_scale * (probs_cond - probs_uncond)
             # [1, seq_len, vocab_size]
+
+            # Debug logging for first step
+            if step_idx == 0:
+                print(f"[DEBUG] Step {step_idx}: logits_cond range=[{logits_cond.min():.2f},{logits_cond.max():.2f}], "
+                      f"logits_uncond range=[{logits_uncond.min():.2f},{logits_uncond.max():.2f}]")
+                print(f"[DEBUG] guided_logits range=[{guided_logits.min():.2f},{guided_logits.max():.2f}]")
 
             # Sample tokens for masked positions
             masked_positions = (current_tokens == mask_token_id)
@@ -354,8 +394,23 @@ class SGDDModel(nn.Module):
             # Renormalize
             probs_at_masked = probs_at_masked / probs_at_masked.sum(dim=-1, keepdim=True)
 
-            # Sample from predicted distribution
-            sampled_tokens = torch.multinomial(probs_at_masked, num_samples=1).squeeze(-1)
+            # Apply top-k sampling to prevent low-quality token selection
+            if top_k > 0 and top_k < probs_at_masked.size(-1):
+                # Get top-k probabilities and their indices
+                top_k_probs, top_k_indices = torch.topk(
+                    probs_at_masked,
+                    k=min(top_k, probs_at_masked.size(-1)),
+                    dim=-1
+                )
+                # Renormalize top-k probabilities
+                top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
+                # Sample from top-k
+                sampled_indices = torch.multinomial(top_k_probs, num_samples=1).squeeze(-1)
+                # Map back to original vocabulary indices
+                sampled_tokens = top_k_indices.gather(1, sampled_indices.unsqueeze(-1)).squeeze(-1)
+            else:
+                # Standard sampling from full distribution
+                sampled_tokens = torch.multinomial(probs_at_masked, num_samples=1).squeeze(-1)
             # [num_masked]
 
             # Confidence-based token selection
@@ -377,8 +432,22 @@ class SGDDModel(nn.Module):
                 mask_indices = torch.where(masked_positions[0])[0]
                 current_tokens[0, mask_indices] = sampled_tokens
 
-        # Decode tokens to text
+        # Decode tokens to text with EOS handling (like LLaMA)
         generated_ids = current_tokens[0].cpu().numpy()
+
+        # Find first EOS token (</s> with ID=2 for RoBERTa)
+        eos_token_id = self.tokenizer.eos_token_id
+        eos_positions = np.where(generated_ids == eos_token_id)[0]
+
+        if len(eos_positions) > 0:
+            # Truncate at first EOS token
+            first_eos_pos = eos_positions[0]
+            generated_ids = generated_ids[:first_eos_pos]
+            print(f"[DEBUG] EOS found at position {first_eos_pos}, truncating output")
+        else:
+            # No EOS token found, use all tokens
+            print(f"[DEBUG] No EOS token found, using all {len(generated_ids)} tokens")
+
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         return generated_text

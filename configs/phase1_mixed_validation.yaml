@@ -21,6 +21,7 @@ model:
   # 训练优化配置
   use_self_conditioning: true
   compute_pad_loss: false
+  compute_eos_loss: true  # 启用EOS token学习，支持变长输出
 
 # 训练配置
 training:
@@ -61,7 +62,7 @@ data:
   alpaca_num_samples: 30000
   alpaca_min_length: 20
 
-  oasst1_num_samples: 10000
+  oasst1_num_samples: 100000
   oasst1_min_length: 20
 
   num_workers: 4
