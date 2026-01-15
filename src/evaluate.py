@@ -19,7 +19,6 @@ from utils.config import SGDDConfig
 from utils.data import get_dataloader
 from utils.metrics import evaluate_generation, compute_bleu, exact_match_score, format_metrics
 from utils.checkpoints import load_best_model
-from utils.sampling import maskgit_sample
 
 
 def evaluate_model(
@@ -82,32 +81,16 @@ def evaluate_model(
             total_samples += input_ids.size(0)
 
             # 生成文本
-            generated = model.generate(
-                input_text="",  # 不使用,因为我们会直接使用semantic_vector
+            generated_texts = model.generate(
+                semantic_vector=semantic_vector,
                 num_steps=num_inference_steps,
                 guidance_scale=cfg_scale,
                 max_length=model.config.max_len,
             )
 
-            # 由于模型generate方法需要input_text,我们需要手动使用maskgit_sample
-            # 或者直接使用模型的generate方法
-            batch_size = input_ids.size(0)
-            for i in range(batch_size):
-                # 获取单个样本的语义向量
-                single_semantic = semantic_vector[i : i + 1]
-
-                # 使用模型的generate方法
-                input_text = input_texts[i] if i < len(input_texts) else ""
-                generated_text = model.generate(
-                    input_text=input_text,
-                    num_steps=num_inference_steps,
-                    guidance_scale=cfg_scale,
-                    max_length=model.config.max_len,
-                )
-
-                all_generated_texts.append(generated_text)
-                all_target_texts.append(target_texts[i] if i < len(target_texts) else "")
-                all_input_texts.append(input_text)
+            all_generated_texts.extend(generated_texts)
+            all_target_texts.extend(target_texts)
+            all_input_texts.extend(input_texts)
 
     # 计算指标
     metrics = {}

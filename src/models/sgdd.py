@@ -260,62 +260,73 @@ class SGDDModel(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        input_text: str,
+        input_text: Optional[str | list[str]] = None,
+        semantic_vector: Optional[torch.Tensor] = None,
         num_steps: int = 16,
         guidance_scale: float = 2.0,
         temperature: float = 1.0,
         max_length: int = 64,
-        repetition_penalty: float = 1.0,  # Default: no penalty
-        top_k: int = -1,  # -1 = no top-k filtering
-    ) -> str:
+        repetition_penalty: float = 1.0,
+        top_k: int = -1,
+    ) -> str | list[str]:
         """
         Generate text from semantic vector using MaskGIT-style decoding.
 
         Args:
-            input_text: Input text to encode
+            input_text: Input text or list of texts to encode. Optional if semantic_vector provided.
+            semantic_vector: Pre-computed semantic vector [batch, hidden_dim]. Optional if input_text provided.
             num_steps: Number of decoding steps
             guidance_scale: CFG guidance scale
             temperature: Sampling temperature
             max_length: Maximum generation length
-            repetition_penalty: Penalty for repeating tokens (1.0 = no penalty, 1.2 = mild, 1.5 = strong)
-            top_k: Only sample from top-k tokens (-1 = disabled, 50 = recommended)
+            repetition_penalty: Penalty for repeating tokens
+            top_k: Only sample from top-k tokens (-1 = disabled)
 
         Returns:
-            generated_text: Generated text
+            generated_text: Generated text or list of texts
         """
         self.eval()
         device = next(self.parameters()).device
 
-        # Encode input text
-        encoded = self.tokenizer(
-            input_text,
-            max_length=max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device)
+        # Handle input
+        if semantic_vector is not None:
+            # Use provided semantic vector
+            pass
+        elif input_text is not None:
+            # Encode input text
+            if isinstance(input_text, str):
+                input_texts = [input_text]
+                is_single = True
+            else:
+                input_texts = input_text
+                is_single = False
 
-        # Get semantic vector (conditional)
-        semantic_vector_cond = self.encoder(input_ids, attention_mask)
-        # [1, hidden_dim]
+            encoded = self.tokenizer(
+                input_texts,
+                max_length=max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"].to(device)
+            attention_mask = encoded["attention_mask"].to(device)
+            
+            semantic_vector = self.encoder(input_ids, attention_mask)
+        else:
+            raise ValueError("Must provide either input_text or semantic_vector")
 
-        # Debug logging
-        print(f"[DEBUG] semantic_vector: mean={semantic_vector_cond.mean():.4f}, "
-              f"std={semantic_vector_cond.std():.4f}, "
-              f"device={semantic_vector_cond.device}")
-        print(f"[DEBUG] guidance_scale={guidance_scale}, temperature={temperature}, num_steps={num_steps}")
-
+        # Get batch size from semantic vector
+        batch_size = semantic_vector.shape[0]
+        
         # Start from all MASK tokens
         mask_token_id = self.tokenizer.mask_token_id
         current_tokens = torch.full(
-            (1, max_length),
+            (batch_size, max_length),
             mask_token_id,
             dtype=torch.long,
             device=device,
         )
-        # [1, max_length]
+        # [batch, max_length]
 
         # MaskGIT iterative decoding
         timesteps = torch.linspace(0, 1, num_steps + 1)[1:]
@@ -324,7 +335,7 @@ class SGDDModel(nn.Module):
         for step_idx, t in enumerate(timesteps):
             # Convert continuous time to discrete timestep
             timestep = torch.tensor(
-                [int(t * self.noise_schedule.num_timesteps)],
+                [int(t * self.noise_schedule.num_timesteps)] * batch_size,
                 device=device,
             )
 
@@ -336,121 +347,104 @@ class SGDDModel(nn.Module):
 
             # Number of tokens to unmask at this step
             # Cosine schedule: more tokens in early steps
-            num_masked = (current_tokens == mask_token_id).sum().item()
+            # We calculate this per sample, but for efficiency we use mean or just first sample's count
+            # Assuming all samples have similar mask rate progress
+            current_masked_counts = (current_tokens == mask_token_id).sum(dim=1)
+            # Use the max masked count to determine how many to unmask (conservative)
+            num_masked = current_masked_counts.float().mean().item()
+            
             num_to_unmask = int((1 - t) * num_masked / 2)
             num_to_unmask = max(1, num_to_unmask)
 
-            # Conditional prediction (with semantic vector and self-conditioning)
-            logits_cond = self.decoder(current_tokens, semantic_vector_cond, timestep, prev_pred=prev_pred)
-            # probs_cond = F.softmax(logits_cond / temperature, dim=-1)
-            # [1, seq_len, vocab_size]
+            # Conditional prediction
+            logits_cond = self.decoder(current_tokens, semantic_vector, timestep, prev_pred=prev_pred)
 
-            # Unconditional prediction (without semantic vector, with self-conditioning)
-            semantic_vector_uncond = torch.zeros_like(semantic_vector_cond)
+            # Unconditional prediction
+            semantic_vector_uncond = torch.zeros_like(semantic_vector)
             logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep, prev_pred=prev_pred)
-            # probs_uncond = F.softmax(logits_uncond / temperature, dim=-1)
-            # [1, seq_len, vocab_size]
 
-            # Classifier-free guidance (FIXED: correct formula)
+            # Classifier-free guidance
             guided_logits = logits_cond + guidance_scale * (logits_cond - logits_uncond)
 
-            # Apply repetition penalty to prevent token loops
+            # Apply repetition penalty
             if repetition_penalty > 1.0:
-                # Count token frequencies in current generated sequence
-                unique_tokens, counts = torch.unique(
-                    current_tokens[current_tokens != mask_token_id],
-                    return_counts=True
-                )
-                # Penalize tokens that have already appeared
-                for token, count in zip(unique_tokens, counts):
-                    # Logit-space penalty: multiply by 1/repetition_penalty^count
-                    guided_logits[:, :, token] /= (repetition_penalty ** count)
+                for b in range(batch_size):
+                    unique_tokens, counts = torch.unique(
+                        current_tokens[b][current_tokens[b] != mask_token_id],
+                        return_counts=True
+                    )
+                    for token, count in zip(unique_tokens, counts):
+                        guided_logits[b, :, token] /= (repetition_penalty ** count)
 
             probs = F.softmax(guided_logits / temperature, dim=-1)
-            #probs = probs_cond + guidance_scale * (probs_cond - probs_uncond)
-            # [1, seq_len, vocab_size]
 
-            # Debug logging for first step
+            # Debug logging for first step (first sample only)
             if step_idx == 0:
-                print(f"[DEBUG] Step {step_idx}: logits_cond range=[{logits_cond.min():.2f},{logits_cond.max():.2f}], "
-                      f"logits_uncond range=[{logits_uncond.min():.2f},{logits_uncond.max():.2f}]")
-                print(f"[DEBUG] guided_logits range=[{guided_logits.min():.2f},{guided_logits.max():.2f}]")
+                print(f"[DEBUG] Step 0 sample 0: logits range=[{logits_cond[0].min():.2f}, {logits_cond[0].max():.2f}]")
 
             # Sample tokens for masked positions
             masked_positions = (current_tokens == mask_token_id)
-            # [1, seq_len]
+            # [batch, seq_len]
 
             if masked_positions.sum() == 0:
-                # No masked tokens left, break
                 break
 
-            # Get probabilities at masked positions
-            # Need to index properly: probs is [1, seq_len, vocab_size]
-            probs_at_masked = probs[0][masked_positions[0]]
-            # [num_masked, vocab_size]
+            # Batched sampling is tricky because different samples have different masks.
+            # We iterate over batch for simplicity in logic, though vectorization is possible.
+            
+            for b in range(batch_size):
+                mask_indices = torch.where(masked_positions[b])[0]
+                if len(mask_indices) == 0:
+                    continue
+                
+                probs_at_masked = probs[b][mask_indices]
+                # [num_masked_b, vocab]
+                
+                # Clamp and renormalize
+                probs_at_masked = torch.clamp(probs_at_masked, min=0, max=1)
+                probs_at_masked = probs_at_masked / probs_at_masked.sum(dim=-1, keepdim=True)
 
-            # Clamp probabilities to avoid numerical issues (untrained model)
-            probs_at_masked = torch.clamp(probs_at_masked, min=0, max=1)
-            # Renormalize
-            probs_at_masked = probs_at_masked / probs_at_masked.sum(dim=-1, keepdim=True)
+                # Top-k sampling
+                if top_k > 0 and top_k < probs_at_masked.size(-1):
+                    top_k_probs, top_k_indices = torch.topk(
+                        probs_at_masked,
+                        k=min(top_k, probs_at_masked.size(-1)),
+                        dim=-1
+                    )
+                    top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
+                    sampled_indices = torch.multinomial(top_k_probs, num_samples=1).squeeze(-1)
+                    sampled_tokens = top_k_indices.gather(1, sampled_indices.unsqueeze(-1)).squeeze(-1)
+                else:
+                    sampled_tokens = torch.multinomial(probs_at_masked, num_samples=1).squeeze(-1)
+                
+                # Confidence-based selection
+                confidence = probs_at_masked.max(dim=-1)[0]
+                
+                if num_to_unmask < len(sampled_tokens):
+                    _, topk_indices = torch.topk(confidence, num_to_unmask)
+                    tokens_to_fill = sampled_tokens[topk_indices]
+                    positions_to_update = mask_indices[topk_indices]
+                    current_tokens[b, positions_to_update] = tokens_to_fill
+                else:
+                    current_tokens[b, mask_indices] = sampled_tokens
 
-            # Apply top-k sampling to prevent low-quality token selection
-            if top_k > 0 and top_k < probs_at_masked.size(-1):
-                # Get top-k probabilities and their indices
-                top_k_probs, top_k_indices = torch.topk(
-                    probs_at_masked,
-                    k=min(top_k, probs_at_masked.size(-1)),
-                    dim=-1
-                )
-                # Renormalize top-k probabilities
-                top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
-                # Sample from top-k
-                sampled_indices = torch.multinomial(top_k_probs, num_samples=1).squeeze(-1)
-                # Map back to original vocabulary indices
-                sampled_tokens = top_k_indices.gather(1, sampled_indices.unsqueeze(-1)).squeeze(-1)
-            else:
-                # Standard sampling from full distribution
-                sampled_tokens = torch.multinomial(probs_at_masked, num_samples=1).squeeze(-1)
-            # [num_masked]
-
-            # Confidence-based token selection
-            # Use max probability as confidence
-            confidence = probs_at_masked.max(dim=-1)[0]
-            # [num_masked]
-
-            # Select top-k most confident positions to fill
-            if num_to_unmask < len(sampled_tokens):
-                _, topk_indices = torch.topk(confidence, num_to_unmask)
-                tokens_to_fill = sampled_tokens[topk_indices]
-
-                # Update only selected positions
-                mask_indices = torch.where(masked_positions[0])[0]
-                positions_to_update = mask_indices[topk_indices]
-                current_tokens[0, positions_to_update] = tokens_to_fill
-            else:
-                # Fill all masked positions
-                mask_indices = torch.where(masked_positions[0])[0]
-                current_tokens[0, mask_indices] = sampled_tokens
-
-        # Decode tokens to text with EOS handling (like LLaMA)
-        generated_ids = current_tokens[0].cpu().numpy()
-
-        # Find first EOS token (</s> with ID=2 for RoBERTa)
+        # Decode tokens
+        generated_ids = current_tokens.cpu().numpy()
         eos_token_id = self.tokenizer.eos_token_id
-        eos_positions = np.where(generated_ids == eos_token_id)[0]
+        
+        decoded_texts = []
+        for b in range(batch_size):
+            ids = generated_ids[b]
+            eos_positions = np.where(ids == eos_token_id)[0]
+            if len(eos_positions) > 0:
+                ids = ids[:eos_positions[0]]
+            
+            text = self.tokenizer.decode(ids, skip_special_tokens=True)
+            decoded_texts.append(text)
 
-        if len(eos_positions) > 0:
-            # Truncate at first EOS token
-            first_eos_pos = eos_positions[0]
-            generated_ids = generated_ids[:first_eos_pos]
-            print(f"[DEBUG] EOS found at position {first_eos_pos}, truncating output")
-        else:
-            # No EOS token found, use all tokens
-            print(f"[DEBUG] No EOS token found, using all {len(generated_ids)} tokens")
-
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        return generated_text
+        if input_text is not None and isinstance(input_text, str):
+            return decoded_texts[0]
+        return decoded_texts
 
     def get_num_params(self) -> int:
         """Return total number of parameters"""
