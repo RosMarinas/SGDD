@@ -75,10 +75,17 @@ def evaluate_model(
             # 计算损失
             semantic_vector = model.encoder.encode_from_tokens(input_ids, attention_mask)
             logits = model.decoder(target_ids, semantic_vector, timestep=torch.zeros(input_ids.size(0), dtype=torch.long, device=device))
-            loss = model.compute_loss(logits, target_ids, target_mask)
+            # 在评估阶段，KL loss 为 0（因为我们不需要计算梯度）
+            kl_loss = torch.zeros(input_ids.size(0), device=device)
+            loss = model.compute_loss(logits, target_ids, target_mask, kl_loss)
 
             total_loss += loss.item() * input_ids.size(0)
             total_samples += input_ids.size(0)
+
+            # 清理不需要的张量以释放显存
+            del logits, kl_loss
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # 生成文本
             generated_texts = model.generate(
@@ -91,6 +98,11 @@ def evaluate_model(
             all_generated_texts.extend(generated_texts)
             all_target_texts.extend(target_texts)
             all_input_texts.extend(input_texts)
+
+            # 清理显存
+            del semantic_vector
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # 计算指标
     metrics = {}
@@ -201,9 +213,11 @@ def main():
     # 确定评估参数（命令行参数优先）
     dataset = args.dataset or config.data.dataset
     split = args.split or "validation"
-    batch_size = args.batch_size or config.training.batch_size * 2  # 评估时使用2倍batch size
+    # 评估时使用较小的batch size以避免OOM（尤其是CFG需要2倍显存）
+    batch_size = args.batch_size or min(config.training.batch_size, 4)  # 限制最大为4
     num_samples = args.num_samples or 1000
-    num_inference_steps = args.num_inference_steps or config.inference.num_inference_steps
+    # 使用较少的推理步数以加快评估（16-32步即可）
+    num_inference_steps = args.num_inference_steps or min(config.inference.num_inference_steps, 32)
     cfg_scale = args.cfg_scale or config.inference.cfg_scale
 
     # 加载数据

@@ -384,12 +384,21 @@ class SGDDModel(nn.Module):
             # Conditional prediction
             logits_cond = self.decoder(current_tokens, semantic_vector, timestep, prev_pred=prev_pred)
 
-            # Unconditional prediction
+            # Unconditional prediction (compute in-place to save memory)
             semantic_vector_uncond = torch.zeros_like(semantic_vector)
-            logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep, prev_pred=prev_pred)
+            with torch.no_grad():  # Don't need gradients for unconditional
+                logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep, prev_pred=prev_pred)
 
-            # Classifier-free guidance
+            # Classifier-free guidance (in-place to save memory)
             guided_logits = logits_cond + guidance_scale * (logits_cond - logits_uncond)
+
+            # Debug logging for first step (first sample only) - before deletion
+            if step_idx == 0:
+                print(f"[DEBUG] Step 0 sample 0: logits range=[{logits_cond[0].min():.2f}, {logits_cond[0].max():.2f}]")
+
+            # Free memory immediately
+            del logits_cond, logits_uncond
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
             # Apply repetition penalty
             if repetition_penalty > 1.0:
@@ -402,10 +411,6 @@ class SGDDModel(nn.Module):
                         guided_logits[b, :, token] /= (repetition_penalty ** count)
 
             probs = F.softmax(guided_logits / temperature, dim=-1)
-
-            # Debug logging for first step (first sample only)
-            if step_idx == 0:
-                print(f"[DEBUG] Step 0 sample 0: logits range=[{logits_cond[0].min():.2f}, {logits_cond[0].max():.2f}]")
 
             # Sample tokens for masked positions
             masked_positions = (current_tokens == mask_token_id)
