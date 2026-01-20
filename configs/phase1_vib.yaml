@@ -5,66 +5,69 @@
 model:
   encoder_name: "roberta-base"
   encoder_freeze: true
-  semantic_dim: 512
+  semantic_dim: 768
 
-  # VIB Configuration (now default behavior)
-  kl_weight: 0.001  # Conservative KL weight
-  kl_anneal_steps: 10000  # Anneal KL weight over first 10K steps
+  # VIB Configuration
+  kl_weight: 0.3  # Increased from 0.05 to 0.1 to encourage more information
+  kl_anneal_steps: 2000
+  kl_threshold: 2.0       # Increased from 2.0 to 4.0 (more "free bits" for reconstruction)
+  contrastive_weight: 0.1 # Reduced from 1.0 to 0.1 (similarity is already low, 0.1 should suffice)
 
   # Decoder 配置
-  num_layers: 6
+  num_layers: 2
   num_heads: 8
   ffn_dim: 2048
   max_length: 128
-  dropout: 0.1
+  dropout: 0.2
 
-  num_diffusion_steps: 256
+  num_diffusion_steps: 1000 # Increased to standard for better quality
   noise_schedule: "cosine"
 
   # 训练优化配置
   use_self_conditioning: true
   compute_pad_loss: false
   compute_eos_loss: true
+  word_dropout_prob: 0.5  # Force decoder to use semantic vector z (30%-50% recommended)
 
 # 训练配置
 training:
   learning_rate: 0.00015
   weight_decay: 0.01
-  batch_size: 64
-  num_epochs: 5
-  gradient_accumulation_steps: 2
+  batch_size: 32
+  num_epochs: 30
+  gradient_accumulation_steps: 2 # Changed to 1 if batch_size 64 fits
   grad_clip: 1.0
 
   lr_scheduler: "cosine"
-  warmup_steps: 500  # Longer warmup for VIB
+  warmup_steps: 1000  # Longer warmup for VIB
 
   use_fp16: true
-  cfg_drop_prob: 0.15
+  cfg_drop_prob: 0.1
 
   log_interval: 20
   save_interval: 1000
-  eval_interval: 200
-  save_epochs: 1
+  eval_interval: 500
+  save_epochs: 10
 
   use_wandb: true
   wandb_project: "sgdd-vib"
   wandb_entity: null
-  wandb_run_name: "phase1_vib_experiment"
+  wandb_run_name: "phase1_vib_fixed_run"
 
 # 数据配置
 data:
   dataset: "mixed"
-  mixing_strategy: "fast_validation"
-  total_samples: 100
+  mixing_strategy: "scale_up"
+  total_samples: 50000 # Appropriate size for a test run
 
-  wiki_num_samples: 600
+  wiki_num_samples: 30000
   wiki_min_length: 20
   wiki_max_length: 128
 
-  alpaca_num_samples: 300
+  alpaca_num_samples: 15000
   alpaca_min_length: 20
 
-  oasst1_num_samples: 100
+  oasst1_num_samples: 5000
   oasst1_min_length: 20
 
   num_workers: 4

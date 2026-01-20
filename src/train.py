@@ -68,8 +68,9 @@ def train_epoch(
     model.train()
 
     total_loss = 0.0
-    total_recon_loss = 0.0  # NEW: Track reconstruction separately
-    total_kl_loss = 0.0  # NEW: Track KL separately
+    total_recon_loss = 0.0  # Track reconstruction separately
+    total_kl_loss = 0.0  # Track KL separately
+    total_contrastive_loss = 0.0  # Track contrastive loss separately
     num_batches = 0
 
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
@@ -100,15 +101,15 @@ def train_epoch(
 
         # 统一的前向传播和反向传播
         with autocast:
-            # Forward pass: returns logits, target, loss_mask, kl_loss
-            logits, predicted_tokens, loss_mask, kl_loss = model(
+            # Forward pass: returns logits, target, loss_mask, kl_loss, semantic_vector
+            logits, predicted_tokens, loss_mask, kl_loss, semantic_vector = model(
                 semantic_input_ids,
                 semantic_attention_mask,
                 cfg_uncond=True,
             )
 
-            # Compute loss with KL divergence
-            loss = model.compute_loss(logits, target_ids, loss_mask, kl_loss)
+            # Compute loss with KL divergence and Contrastive Loss
+            loss, loss_components = model.compute_loss(logits, target_ids, loss_mask, kl_loss, semantic_vector, return_components=True)
             raw_loss = loss.item()
             # 梯度累积:loss除以累积步数以保持梯度尺度一致
             loss = loss / config.training.gradient_accumulation_steps
@@ -151,10 +152,20 @@ def train_epoch(
         total_loss += raw_loss
         kl_value = kl_loss.mean().item()
         total_kl_loss += kl_value
+        if loss_components and "contrastive_loss" in loss_components:
+            contrastive_value = loss_components["contrastive_loss"]
+            total_contrastive_loss += contrastive_value
         num_batches += 1
 
         # 更新进度条
-        progress_bar.set_postfix({"loss": raw_loss, "kl": kl_value})
+        if loss_components and "contrastive_loss" in loss_components:
+            progress_bar.set_postfix({
+                "loss": raw_loss,
+                "kl": kl_value,
+                "iso": loss_components["contrastive_loss"]
+            })
+        else:
+            progress_bar.set_postfix({"loss": raw_loss, "kl": kl_value})
 
         # 日志记录（按照epoch统计loss，仅在训练过程中用于监控）
         if (batch_idx + 1) % config.training.log_interval == 0:
@@ -162,14 +173,17 @@ def train_epoch(
             avg_kl = total_kl_loss / num_batches
             step = epoch * len(dataloader) + batch_idx + 1
             if config.training.use_wandb:
-                wandb.log({
-                    "train/loss": avg_loss,  # 当前epoch的累计平均loss
+                log_dict = {
+                    "train/loss": avg_loss,
                     "train/reconstruction_loss": avg_loss - avg_kl,
                     "train/kl_loss": avg_kl,
-                    "train/batch_loss": raw_loss,  # 当前batch的瞬时loss
+                    "train/batch_loss": raw_loss,
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                     "train/step": step,
-                })
+                }
+                if total_contrastive_loss > 0:
+                    log_dict["train/isotropy_loss"] = total_contrastive_loss / num_batches
+                wandb.log(log_dict)
 
     # 返回平均损失
     avg_loss = total_loss / num_batches
@@ -240,9 +254,14 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         cfg_prob=config.training.cfg_drop_prob,
         use_self_conditioning=config.model.use_self_conditioning,
         compute_pad_loss=config.model.compute_pad_loss,
+        compute_eos_loss=config.model.compute_eos_loss,
+        word_dropout_prob=config.model.word_dropout_prob,
+        mask_token_id=config.model.mask_token_id,
         # VIB config
         kl_weight=getattr(config.model, 'kl_weight', 0.001),
         kl_anneal_steps=getattr(config.model, 'kl_anneal_steps', 10000),
+        kl_threshold=getattr(config.model, 'kl_threshold', 0.0),
+        contrastive_weight=getattr(config.model, 'contrastive_weight', 0.0),
     )
     model = SGDDModel(model_config).to(device)
 

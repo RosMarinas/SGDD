@@ -33,6 +33,7 @@ class SemanticEncoder(nn.Module):
         hidden_dim: int = 512,
         kl_weight: float = 0.001,
         kl_anneal_steps: int = 10000,
+        kl_threshold: float = 0.0,
     ):
         """
         Initialize the semantic encoder with Variational Information Bottleneck.
@@ -42,6 +43,7 @@ class SemanticEncoder(nn.Module):
             hidden_dim: Output dimension for semantic vector (default: 512)
             kl_weight: Weight for KL divergence loss (default: 0.001)
             kl_anneal_steps: Number of steps for KL annealing (default: 10000)
+            kl_threshold: Minimum KL value (free bits) to prevent posterior collapse (default: 0.0)
         """
         super().__init__()
 
@@ -62,30 +64,34 @@ class SemanticEncoder(nn.Module):
         # VIB parameters
         self.kl_weight = kl_weight
         self.kl_anneal_steps = kl_anneal_steps
+        self.kl_threshold = kl_threshold
         self._current_step = 0  # For KL annealing
 
         # Variational Information Bottleneck
         # Two separate projections for mu and logvar
+        # Using BatchNorm1d instead of LayerNorm to reduce anisotropy (Cone Effect)
         self.mu_layer = nn.Sequential(
             nn.Linear(768, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
+            nn.BatchNorm1d(hidden_dim)
         )
 
         self.logvar_layer = nn.Sequential(
             nn.Linear(768, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
+            nn.BatchNorm1d(hidden_dim)
         )
 
         # Initialize logvar to small values (near-deterministic start)
         # This prevents posterior collapse at the beginning of training
+        # CRITICAL FIX: Initialize bias to -10 to make sigma very small (~0.0067)
+        # This ensures the signal is not drowned in noise at the start
         for layer in self.logvar_layer:
             if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight, gain=0.01)
-                nn.init.zeros_(layer.bias)
+                nn.init.xavier_uniform_(layer.weight, gain=0.001)
+                nn.init.constant_(layer.bias, -10.0)
 
     def forward(
         self,
@@ -154,6 +160,11 @@ class SemanticEncoder(nn.Module):
         # KL divergence: D_KL(N(mu, sigma^2) || N(0, 1))
         # = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
         kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+
+        # Apply KL threshold (free bits)
+        if self.kl_threshold > 0:
+            kl_per_sample = torch.max(kl_per_sample, torch.tensor(self.kl_threshold, device=kl_per_sample.device))
+
         kl_weighted = kl_per_sample * current_kl_weight  # [batch_size]
 
         if return_kl:
@@ -243,9 +254,9 @@ if __name__ == "__main__":
         assert param.requires_grad == False, f"Parameter {name} is not frozen!"
     print("[OK] All RoBERTa parameters are frozen")
 
-    # Test adapter is trainable
-    for name, param in encoder.adapter.named_parameters():
-        assert param.requires_grad == True, f"Adapter parameter {name} should be trainable"
-    print("[OK] Adapter is trainable")
+    # Test projection layers are trainable
+    for name, param in encoder.mu_layer.named_parameters():
+        assert param.requires_grad == True, f"Mu layer parameter {name} should be trainable"
+    print("[OK] Projection layers are trainable")
 
     print("\n[SUCCESS] All tests passed!")

@@ -25,6 +25,8 @@ class SGDDConfig:
     hidden_dim: int = 512
     kl_weight: float = 0.001  # KL divergence weight
     kl_anneal_steps: int = 10000  # KL annealing steps
+    kl_threshold: float = 2.0  # Free bits (min KL) - Increased to prevent vanishing
+    contrastive_weight: float = 0.1  # Weight for isotropy regularization - Increased to prevent collapse
 
     # Decoder
     num_layers: int = 6
@@ -43,6 +45,10 @@ class SGDDConfig:
     compute_pad_loss: bool = False  # Compute loss on PAD positions (teaches model to output PAD)
     compute_eos_loss: bool = True  # Compute loss on EOS positions (teaches model to output EOS)
     eos_token_id: int = 2  # RoBERTa EOS token ID
+
+    # Word Dropout - Force decoder to use semantic vector z
+    word_dropout_prob: float = 0.3  # Probability of replacing tokens with <MASK> (30%-50% recommended)
+    mask_token_id: int = 50264  # RoBERTa MASK token ID
 
 
 class SGDDModel(nn.Module):
@@ -73,6 +79,7 @@ class SGDDModel(nn.Module):
             hidden_dim=config.hidden_dim,
             kl_weight=config.kl_weight,
             kl_anneal_steps=config.kl_anneal_steps,
+            kl_threshold=config.kl_threshold,
         )
 
         # Decoder Embedding Initialization with Pretrained RoBERTa Weights
@@ -136,6 +143,7 @@ class SGDDModel(nn.Module):
             target_tokens: Target tokens for loss [batch, seq_len]
             loss_mask: Loss mask [batch, seq_len]
             kl_loss: KL divergence [batch]
+            semantic_vector: Latent vector z [batch, hidden_dim]
         """
         batch_size = input_ids.shape[0]
         device = input_ids.device
@@ -153,6 +161,9 @@ class SGDDModel(nn.Module):
             return_kl=True
         )
         # [batch, hidden_dim]
+        
+        # Keep a copy of the original semantic vector for loss computation (before CFG masking)
+        original_semantic_vector = semantic_vector
 
         # Apply classifier-free guidance during training
         if self.training and cfg_uncond:
@@ -166,6 +177,32 @@ class SGDDModel(nn.Module):
 
         # Forward diffusion: add noise to input tokens
         x_start = input_ids.clone()
+
+        # Word Dropout: Force decoder to use semantic vector z
+        # By randomly replacing tokens with <MASK>, we prevent the decoder from relying
+        # solely on autoregressive patterns and force it to extract information from z
+        if self.training and self.config.word_dropout_prob > 0:
+            # Create a random mask for word dropout
+            dropout_mask = torch.rand(x_start.shape, device=device) < self.config.word_dropout_prob
+
+            # Exclude special tokens from dropout (PAD=1, EOS=2, but keep MASK=50264)
+            # We only dropout real content tokens
+            special_tokens = {
+                self.tokenizer.pad_token_id,  # PAD
+                self.tokenizer.eos_token_id,  # EOS
+                self.tokenizer.bos_token_id,  # BOS (<s>)
+            }
+            for special_id in special_tokens:
+                if special_id is not None:
+                    dropout_mask &= (x_start != special_id)
+
+            # Apply word dropout: replace selected tokens with MASK
+            x_start = torch.where(
+                dropout_mask,
+                torch.tensor(self.config.mask_token_id, device=device),
+                x_start
+            )
+
         x_t = self.diffusion.q_sample(x_start, timestep)
         # [batch, seq_len]
 
@@ -194,7 +231,7 @@ class SGDDModel(nn.Module):
         )
         # [batch, seq_len]
 
-        return logits, x_start, loss_mask, kl_loss
+        return logits, x_start, loss_mask, kl_loss, original_semantic_vector
 
     def compute_loss(
         self,
@@ -202,18 +239,23 @@ class SGDDModel(nn.Module):
         target_tokens: torch.Tensor,
         loss_mask: torch.Tensor,
         kl_loss: torch.Tensor,
-    ) -> torch.Tensor:
+        semantic_vector: Optional[torch.Tensor] = None,
+        return_components: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict]:
         """
-        Compute masked cross-entropy loss + KL divergence.
+        Compute masked cross-entropy loss + KL divergence + Contrastive Loss.
 
         Args:
             logits: Predicted logits [batch, seq_len, vocab_size]
             target_tokens: Target tokens [batch, seq_len]
             loss_mask: Loss mask [batch, seq_len]
             kl_loss: KL divergence per sample [batch]
+            semantic_vector: Latent vectors for contrastive loss [batch, hidden_dim]
+            return_components: If True, return (loss, components_dict)
 
         Returns:
-            loss: Scalar loss (reconstruction + KL)
+            loss: Scalar loss (reconstruction + KL + contrastive)
+            components: Dict with individual loss components (if return_components=True)
         """
         # Compute cross-entropy loss for each position
         loss = F.cross_entropy(
@@ -228,8 +270,39 @@ class SGDDModel(nn.Module):
 
         # Add KL divergence (kl_loss is already weighted by kl_weight in encoder)
         kl_loss_mean = kl_loss.mean()
-        total_loss = recon_loss + kl_loss_mean
+        
+        # Add Contrastive/Isotropy Loss
+        contrastive_loss = torch.tensor(0.0, device=logits.device)
+        if semantic_vector is not None and self.config.contrastive_weight > 0:
+            # Normalize vectors
+            z_norm = F.normalize(semantic_vector, p=2, dim=1)
+            # Compute pairwise cosine similarity matrix
+            sim_matrix = torch.mm(z_norm, z_norm.t())  # [batch, batch]
+            
+            # We want to minimize off-diagonal elements (make them close to 0)
+            # Create a mask for off-diagonal elements
+            batch_size = semantic_vector.shape[0]
+            if batch_size > 1:
+                eye = torch.eye(batch_size, device=logits.device)
+                off_diag_mask = 1 - eye
+                
+                # Minimize mean squared cosine similarity of distinct pairs
+                # Only consider off-diagonal
+                off_diag_sim = sim_matrix * off_diag_mask
+                contrastive_loss = (off_diag_sim ** 2).sum() / (batch_size * (batch_size - 1))
+                
+                contrastive_loss = contrastive_loss * self.config.contrastive_weight
 
+        total_loss = recon_loss + kl_loss_mean + contrastive_loss
+
+        if return_components:
+            components = {
+                "reconstruction_loss": recon_loss.item(),
+                "kl_loss": kl_loss_mean.item(),
+            }
+            if contrastive_loss.item() > 0:
+                components["contrastive_loss"] = contrastive_loss.item()
+            return total_loss, components
         return total_loss
 
     def _project_roberta_embeddings(

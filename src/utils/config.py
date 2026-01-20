@@ -21,6 +21,8 @@ class ModelConfig:
     # VIB配置
     kl_weight: float = 0.001  # KL divergence weight
     kl_anneal_steps: int = 10000  # KL annealing steps
+    kl_threshold: float = 2.0  # Free bits (min KL) - Increased to prevent vanishing
+    contrastive_weight: float = 0.1  # Weight for isotropy regularization - Increased to prevent collapse
 
     # 解码器配置 (字段名与 SGDDConfig 保持一致)
     num_layers: int = 6  # 对应 SGDDConfig 的 num_layers
@@ -37,6 +39,8 @@ class ModelConfig:
     use_self_conditioning: bool = True  # 对应 SGDDConfig 的 use_self_conditioning
     compute_pad_loss: bool = False  # 对应 SGDDConfig 的 compute_pad_loss
     compute_eos_loss: bool = True  # 对应 SGDDConfig 的 compute_eos_loss
+    word_dropout_prob: float = 0.3  # Word dropout概率 (0.0-0.5), 强制解码器依赖语义向量z
+    mask_token_id: int = 50264  # RoBERTa MASK token ID
 
 
 @dataclass

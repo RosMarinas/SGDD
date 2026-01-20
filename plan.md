@@ -769,6 +769,478 @@ Position 3: ID=2 (</s>) ← EOS token已存在
 
 ---
 
+## Word Dropout 实现 - 强制解码器依赖语义向量 z (2026-01-20)
+
+### 问题背景
+
+用户提出了一个关键问题:**如何强迫解码器真正使用语义向量 z,而不是依赖自回归能力?**
+
+当前问题:
+- 解码器可能通过观察部分tokens来预测其他tokens
+- 即使没有z,解码器也能利用语言模式进行猜测
+- 导致z中的语义信息未被充分利用
+
+### 解决方案: Word Dropout
+
+**核心思路**:在训练时,以一定概率(30%-50%)将目标文本中的token替换为`<MASK>`,这样解码器如果不看$z$就无法还原被mask的词。
+
+**为什么有效**:
+1. **破坏自回归能力**:当30%-50%的tokens被mask时,解码器无法仅依赖上下文预测
+2. **强制信息提取**:解码器必须从z中提取语义信息来还原被mask的tokens
+3. **互补于扩散过程**:扩散过程已经添加了噪声,word dropout进一步增加难度
+4. **类似BERT预训练**:BERT也是通过mask tokens迫使模型学习上下文表示
+
+### 实施的改进
+
+#### 1. 配置参数 (`src/models/sgdd.py:49-51`)
+
+```python
+# Word Dropout - Force decoder to use semantic vector z
+word_dropout_prob: float = 0.3  # Probability of replacing tokens with <MASK> (30%-50% recommended)
+mask_token_id: int = 50264  # RoBERTa MASK token ID
+```
+
+#### 2. Word Dropout 实现 (`src/models/sgdd.py:181-204`)
+
+```python
+# Forward diffusion: add noise to input tokens
+x_start = input_ids.clone()
+
+# Word Dropout: Force decoder to use semantic vector z
+# By randomly replacing tokens with <MASK>, we prevent the decoder from relying
+# solely on autoregressive patterns and force it to extract information from z
+if self.training and self.config.word_dropout_prob > 0:
+    # Create a random mask for word dropout
+    dropout_mask = torch.rand(x_start.shape, device=device) < self.config.word_dropout_prob
+
+    # Exclude special tokens from dropout (PAD, EOS, BOS)
+    # We only dropout real content tokens
+    special_tokens = {
+        self.tokenizer.pad_token_id,  # PAD
+        self.tokenizer.eos_token_id,  # EOS
+        self.tokenizer.bos_token_id,  # BOS (<s>)
+    }
+    for special_id in special_tokens:
+        if special_id is not None:
+            dropout_mask &= (x_start != special_id)
+
+    # Apply word dropout: replace selected tokens with MASK
+    x_start = torch.where(
+        dropout_mask,
+        torch.tensor(self.config.mask_token_id, device=device),
+        x_start
+    )
+
+x_t = self.diffusion.q_sample(x_start, timestep)
+```
+
+**关键设计决策**:
+- ✅ **仅训练时启用**:推理时不使用word dropout,保持正常生成
+- ✅ **保护特殊tokens**:不mask PAD、EOS、BOS,保持序列结构完整
+- ✅ **随机mask**:每个token独立地以`word_dropout_prob`概率被mask
+- ✅ **在扩散噪声之前应用**:先word dropout,再添加扩散噪声,两层扰动
+
+#### 3. 配置文件更新
+
+在所有训练配置中添加`word_dropout_prob: 0.3`:
+- ✅ `configs/phase1_vib.yaml:30`
+- ✅ `configs/phase1_wiki.yaml:30`
+- ✅ `configs/phase1_mixed_validation.yaml:25`
+
+### 预期效果
+
+**训练动态**:
+1. **更高的重建loss**:因为部分tokens被mask,重建任务更难
+2. **更强的语义学习**:解码器被迫学习从z中提取信息
+3. **可能更慢的收敛**:任务难度增加,可能需要更多训练步骤
+
+**生成改进**:
+1. **更好的语义一致性**:生成内容更准确地反映输入的语义
+2. **降低重复问题**:因为不能依赖简单的自回归模式
+3. **提升多样性**:解码器学会使用z生成不同表达
+
+### 超参数建议
+
+- **`word_dropout_prob = 0.3`** (默认值,30%)
+  - 适合大多数场景
+  - 平衡难度和学习稳定性
+
+- **`word_dropout_prob = 0.5`** (50%)
+  - 更强制,适合发现模型不使用z的问题
+  - 可能需要更长的训练时间
+
+- **`word_dropout_prob = 0.0`** (禁用)
+  - 作为消融实验的对照组
+  - 用于验证word dropout的效果
+
+### 技术细节
+
+#### 与扩散过程的关系
+
+Word dropout和扩散噪声是**互补**的:
+
+| 维度 | 扩散噪声 (Diffusion Noise) | Word Dropout |
+|------|--------------------------|--------------|
+| 作用对象 | 所有tokens | 随机选中的30%-50%tokens |
+| 操作方式 | 替换为噪声分布的随机token | 替换为`<MASK>` token |
+| 时间步 | 依赖于diffusion timestep | 独立于timestep,始终应用 |
+| 训练/推理 | 训练和推理都使用 | **仅训练时使用** |
+
+#### 与Self-Conditioning的关系
+
+- **Word dropout**:在输入端增加难度,迫使使用z
+- **Self-conditioning**:在decoder输入端提供前一步预测,帮助收敛
+- 两者**协同工作**:word dropout提供挑战,self-conditioning提供辅助
+
+#### 与CFG的关系
+
+- **Word dropout**:增加任务难度,强制使用z
+- **CFG (Classifier-Free Guidance)**:推理时增强条件信号
+- 两者**目标一致**:都确保模型真正利用语义向量z
+
+### 验证方法
+
+创建测试脚本 `temp/test_word_dropout.py`:
+
+```python
+# 测试word dropout是否生效
+# 1. 验证被mask的tokens数量约等于word_dropout_prob
+# 2. 验证特殊tokens(PAD, EOS, BOS)不被mask
+# 3. 比较有/无word dropout的训练loss
+```
+
+### 下一步行动
+
+1. ✅ 代码实现完成
+2. ✅ 配置文件更新完成
+3. ⏳ **训练测试**:
+   ```bash
+   # 使用word dropout训练
+   uv run python src/train.py --config configs/phase1_vib.yaml
+   ```
+4. ⏳ **消融实验**:
+   - 训练一个`word_dropout_prob=0.0`的模型作为对照
+   - 比较两者的重建质量和生成质量
+5. ⏳ **分析语义向量使用情况**:
+   - 使用attention可视化查看decoder对z的关注度
+   - 比较有/无word dropout时的attention权重
+
+### 修改的文件清单
+
+1. ✅ `src/models/sgdd.py:49-51` - 添加配置参数
+2. ✅ `src/models/sgdd.py:181-204` - 实现word dropout逻辑
+3. ✅ `src/utils/config.py:42-43` - 在ModelConfig中添加word_dropout_prob和mask_token_id
+4. ✅ `src/train.py:257-259` - 传递word dropout参数到SGDDModel
+5. ✅ `configs/phase1_vib.yaml:30` - 配置word dropout
+6. ✅ `configs/phase1_wiki.yaml:30` - 配置word dropout
+7. ✅ `configs/phase1_mixed_validation.yaml:25` - 配置word dropout
+
+### Bug修复 (2026-01-20)
+
+**问题**: 训练时报错 `TypeError: ModelConfig.__init__() got an unexpected keyword argument 'word_dropout_prob'`
+
+**原因**:
+1. YAML配置文件中添加了`word_dropout_prob`
+2. 但`src/utils/config.py`中的`ModelConfig`类没有对应字段
+3. `src/train.py`也没有传递这些参数到`SGDDModel`
+
+**修复**:
+1. ✅ 在`src/utils/config.py:42-43`添加`word_dropout_prob`和`mask_token_id`字段
+2. ✅ 在`src/train.py:257-259`传递这些参数到`ModelConfig`
+3. ✅ 使用`getattr()`作为后备确保向后兼容
+
+### 时间戳
+
+- 2026-01-20: 实现word dropout机制
+- 2026-01-20: 修复配置加载错误
+- 2026-01-20: 更新所有配置文件和训练脚本
+- 准备开始训练验证效果
+
+---
+
+## 各向异性 (Anisotropy) 问题诊断和修复 (2026-01-20)
+
+### 问题背景
+
+用户报告 Mu 向量相似度过高 (0.96),导致各向异性问题:
+- **现状**: LayerNorm 是对单个样本内部的特征进行归一化,无法保证不同样本在空间中的分布是均匀的
+- **原因**: 预训练模型 (如 RoBERTa) 的原始嵌入空间天然呈现"锥形"分布 (Cone Effect)
+- **目标**: 降低相似度到 0.5 以下或接近 0,增加隐空间表达能力
+
+### 实施的改进方案
+
+#### 方案一: 架构优化 - 引入 BatchNorm ✅ 已实现
+
+**修改位置**: `src/models/encoder.py:73-85`
+
+```python
+# 将 VIB 投影层中的 LayerNorm 替换为 BatchNorm1d
+self.mu_layer = nn.Sequential(
+    nn.Linear(768, hidden_dim),
+    nn.GELU(),
+    nn.Linear(hidden_dim, hidden_dim),
+    nn.BatchNorm1d(hidden_dim)  # ✅ 替换 LayerNorm
+)
+
+self.logvar_layer = nn.Sequential(
+    nn.Linear(768, hidden_dim),
+    nn.GELU(),
+    nn.Linear(hidden_dim, hidden_dim),
+    nn.BatchNorm1d(hidden_dim)  # ✅ 替换 LayerNorm
+)
+```
+
+**原理**:
+- BatchNorm 在 Batch 维度上进行归一化
+- 强制每个特征维度在整个 Batch 内均值为 0、方差为 1
+- 从几何上直接破坏"锥形"分布,拉扯成"球形"分布
+
+#### 方案二: 各向同性正则化 (Isotropy Regularization) ✅ 已实现
+
+**修改位置**: `src/models/sgdd.py:241-264`
+
+```python
+# 添加各向同性正则化损失项
+contrastive_loss = torch.tensor(0.0, device=logits.device)
+if semantic_vector is not None and self.config.contrastive_weight > 0:
+    # 归一化向量
+    z_norm = F.normalize(semantic_vector, p=2, dim=1)
+    # 计算成对余弦相似度矩阵
+    sim_matrix = torch.mm(z_norm, z_norm.t())  # [batch, batch]
+
+    # 惩罚非对角线元素 (使不同样本的向量相互排斥)
+    if batch_size > 1:
+        eye = torch.eye(batch_size, device=logits.device)
+        off_diag_mask = 1 - eye
+
+        # 最小化不同样本对的余弦相似度
+        off_diag_sim = sim_matrix * off_diag_mask
+        contrastive_loss = (off_diag_sim ** 2).sum() / (batch_size * (batch_size - 1))
+        contrastive_loss = contrastive_loss * self.config.contrastive_weight
+```
+
+**原理**:
+- 显式惩罚 Batch 内所有 Mu 向量的两两余弦相似度
+- 公式: $L_{iso} = \frac{1}{N(N-1)} \sum_{i \neq j} CosineSim(z_i, z_j)^2$
+- 迫使模型学习更正交的特征表示
+
+### 代码审查结果
+
+#### ✅ 方案一实现正确
+- BatchNorm1d 正确应用于 mu_layer 和 logvar_layer
+- 位置正确 (在 Linear 激活之后)
+
+#### ✅ 方案二实现正确但需要增强日志
+
+**发现的问题**:
+1. ✅ 损失计算逻辑正确
+2. ❌ **缺少 logging**: 虽然计算了对比损失,但没有单独记录到 WandB
+
+**已实施的修复**:
+
+1. **修改 `compute_loss` 返回 components** (`src/models/sgdd.py:206-276`)
+   ```python
+   def compute_loss(
+       self,
+       ...,
+       return_components: bool = False,
+   ) -> torch.Tensor | tuple[torch.Tensor, dict]:
+       ...
+       if return_components:
+           components = {
+               "reconstruction_loss": recon_loss.item(),
+               "kl_loss": kl_loss_mean.item(),
+           }
+           if contrastive_loss.item() > 0:
+               components["contrastive_loss"] = contrastive_loss.item()
+           return total_loss, components
+       return total_loss
+   ```
+
+2. **更新训练循环记录各向同性损失** (`src/train.py:70-186`)
+   ```python
+   # 跟踪对比损失
+   total_contrastive_loss = 0.0
+
+   # 在训练循环中
+   loss, loss_components = model.compute_loss(..., return_components=True)
+
+   # 记录到 WandB
+   if total_contrastive_loss > 0:
+       log_dict["train/isotropy_loss"] = total_contrastive_loss / num_batches
+   ```
+
+### 验证工具
+
+创建了专门的验证脚本 `temp/check_isotropy.py`:
+
+**功能**:
+1. ✅ 检查架构是否使用 BatchNorm1d
+2. ✅ 检查是否配置了各向同性正则化
+3. ✅ 分析 Mu 和 Z 向量的各向异性指标
+4. ✅ 计算余弦相似度统计 (mean, std, max, min)
+5. ✅ 生成 isotropy score (越接近 0 越好)
+
+**使用方法**:
+```bash
+uv run python temp/check_isotropy.py --config configs/phase1_vib.yaml --num_batches 10
+```
+
+**输出示例**:
+```
+============================================================
+Mu Vectors Isotropy Analysis
+============================================================
+Batch size: 320
+Vector dimension: 512
+
+Cosine Similarity Statistics (off-diagonal):
+  Mean:   +0.9600 (closer to 0 is better)
+  Std:    0.0234
+  Max:    +0.9987
+  Min:    +0.8213
+
+Isotropy Score: 0.9600 (lower is better)
+  Target: < 0.1 for good isotropy
+  Current: ✗ NEEDS IMPROVEMENT
+```
+
+### 配置文件
+
+在 `configs/phase1_vib.yaml` 中的相关配置:
+
+```yaml
+kl_weight: 0.1              # VIB KL 权重
+kl_anneal_steps: 2000       # KL annealing 步数
+kl_threshold: 4.0           # Free bits (允许的最小 KL)
+contrastive_weight: 0.1     # 各向同性正则化权重 (从 1.0 降低到 0.1)
+```
+
+**配置说明**:
+- `contrastive_weight: 0.1` - 降低权重因为相似度已经很低 (0.1 应该足够)
+- `kl_threshold: 4.0` - 增加 free bits 允许更多信息用于重建
+- `kl_weight: 0.1` - 增加 KL 权重鼓励更多编码信息
+
+### 测试建议
+
+1. **运行验证脚本**:
+   ```bash
+   uv run python temp/check_isotropy.py --config configs/phase1_vib.yaml --num_batches 10
+   ```
+
+2. **训练时监控指标**:
+   - `train/isotropy_loss` - 各向同性损失 (应该逐渐降低)
+   - `train/reconstruction_loss` - 重建损失
+   - `train/kl_loss` - KL 损失
+
+3. **训练后验证**:
+   - Mu 向量相似度应该 < 0.1
+   - Isotropy score 应该接近 0
+   - 重建质量应该保持或改进
+
+### 预期效果
+
+**训练前** (基线):
+- Mu 相似度: ~0.96 (很高)
+- Isotropy score: 0.96 (很差)
+
+**训练后** (预期):
+- Mu 相似度: < 0.1 (显著降低)
+- Isotropy score: < 0.1 (各向同性)
+- 重建损失: 可能略高 (因为 KL 增加)
+- 生成质量: 应该改进 (更好的语义表达)
+
+### 技术细节
+
+#### 为什么 BatchNorm 比 LayerNorm 好
+
+| 特性 | LayerNorm | BatchNorm1d |
+|------|-----------|-------------|
+| 归一化维度 | 单个样本内 | Batch 维度 |
+| 均值/方差 | 每个样本独立 | 整个 batch 共享 |
+| 空间几何 | 保持分布形状 | 强制球形分布 |
+| 各向异性 | 无法打破 | ✅ 直接破坏 |
+
+#### 各向同性正则化的作用
+
+1. **显式优化**: 直接优化目标 (相似度 → 0)
+2. **与 BatchNorm 协同**: BatchNorm 提供基础,正则化进一步优化
+3. **可调节权重**: 通过 `contrastive_weight` 控制强度
+
+### 修改的文件清单
+
+1. ✅ `src/models/encoder.py:73-85` - BatchNorm 替换 LayerNorm
+2. ✅ `src/models/sgdd.py:241-264` - 各向同性正则化实现
+3. ✅ `src/models/sgdd.py:206-276` - 返回 loss components
+4. ✅ `src/train.py:70-186` - 记录 isotropy loss
+5. ✅ `temp/check_isotropy.py` (NEW) - 验证脚本
+
+### 下一步行动
+
+1. ✅ 代码修改完成
+2. ⏳ **运行验证脚本**检查当前模型各向异性
+3. ⏳ **使用新配置训练**:
+   ```bash
+   uv run python src/train.py --config configs/phase1_vib.yaml
+   ```
+4. ⏳ **训练后重新验证**各向异性指标
+5. ⏳ **比较生成质量** (BLEU, Exact Match)
+
+### 时间戳
+
+- 2026-01-20: 完成 BatchNorm 和各向同性正则化实现
+- 2026-01-20: 添加 loss components 日志记录
+- 2026-01-20: 创建验证脚本
+
+---
+
+## Troubleshoot脚本配置化改进 (2026-01-20)
+
+### 改进内容
+
+将`temp/troubleshoot_collapse.py`修改为动态加载配置文件,支持通过命令行参数指定配置。
+
+### 修改内容
+
+1. **添加argparse参数解析**
+   - `--config`: 指定配置文件路径(必需)
+   - `--checkpoint`: 指定checkpoint路径(可选,默认自动检测最新checkpoint)
+
+2. **动态加载配置**
+   - 使用`SGDDConfig.from_yaml()`从指定配置文件加载
+   - 根据配置中的`checkpoint_dir`自动查找最新checkpoint
+
+3. **使用配置参数**
+   - 使用`config.inference.num_inference_steps`作为生成步数
+   - 使用`config.model.max_length`作为最大长度
+   - 显示配置摘要信息(encoder、KL weight、threshold等)
+
+### 使用方法
+
+```bash
+# 使用phase1_vib配置
+uv run python temp/troubleshoot_collapse.py --config configs/phase1_vib.yaml
+
+# 使用phase1_wiki配置
+uv run python temp/troubleshoot_collapse.py --config configs/phase1_wiki.yaml
+
+# 指定checkpoint路径
+uv run python temp/troubleshoot_collapse.py --config configs/phase1_vib.yaml --checkpoint checkpoints/phase1_vib/checkpoint_epoch_5.pt
+```
+
+### 改进效果
+
+- ✅ 支持任意配置文件,无需修改代码
+- ✅ 自动检测最新checkpoint,方便调试
+- ✅ 显示配置摘要,便于确认参数
+- ✅ 生成参数与配置一致,确保结果可靠性
+
+### 修改的文件清单
+
+- ✅ `temp/troubleshoot_collapse.py` - 添加配置文件支持
+
+---
+
 ## Inference Bug修复总结
 
 ### 问题发现

@@ -22,6 +22,7 @@ model:
   use_self_conditioning: true
   compute_pad_loss: false
   compute_eos_loss: true  # 启用EOS token学习，支持变长输出
+  word_dropout_prob: 0.3  # Force decoder to use semantic vector z (30%-50% recommended)
 
 # 训练配置
 training:

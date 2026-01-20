@@ -7,6 +7,11 @@ model:
   encoder_name: "roberta-base"
   encoder_freeze: true
   semantic_dim: 512  # 对应 SGDDConfig 的 hidden_dim
+  
+  # VIB settings
+  kl_weight: 0.1        # Increased from 0.001 to 0.1 for stronger regularization
+  kl_anneal_steps: 100  # Reduced from 10000 to 100 to kick in during short training
+  kl_threshold: 2.0     # Free bits
 
   # Decoder 配置 (字段名与 SGDDConfig 保持一致)
   num_layers: 6
@@ -21,43 +26,45 @@ model:
   # 训练优化配置 (字段名与 SGDDConfig 保持一致)
   use_self_conditioning: true  # 启用self-conditioning提升质量
   compute_pad_loss: false  # MaskGIT标准:只在MASK位置计算loss,不计算PAD
+  compute_eos_loss: true  # 启用EOS token学习，支持变长输出
+  word_dropout_prob: 0.3  # Force decoder to use semantic vector z (30%-50% recommended)
 
 # 训练配置
 training:
-  learning_rate: 0.0002  # 优化: 使用预训练embedding后可以提高学习率
+  learning_rate: 0.0002
   weight_decay: 0.01
-  batch_size: 64  # 优化: 降低batch_size以适应更大的序列长度(128)
-  num_epochs: 30
-  gradient_accumulation_steps: 2  # 优化: 使用梯度累积来模拟更大batch(64*2=128)
+  batch_size: 16  # Reduced batch size for safety
+  num_epochs: 2   # Reduced epochs
+  gradient_accumulation_steps: 1
   grad_clip: 1.0
 
   lr_scheduler: "cosine"
-  warmup_steps: 2000  # 优化: 增加warmup步数以稳定训练
+  warmup_steps: 100  # Reduced warmup
   use_fp16: true
   cfg_drop_prob: 0.1
 
   log_interval: 10
-  save_interval: 1000
-  eval_interval: 500
-  save_epochs: 20
+  save_interval: 100
+  eval_interval: 100
+  save_epochs: 1
 
   use_wandb: true
   wandb_project: "sgdd"
   wandb_entity: null
-  wandb_run_name: "phase1_wiki_reconstruction"
+  wandb_run_name: "phase1_wiki_debug"
 
 # 数据配置
 data:
   dataset: "wikipedia"
 
-  wiki_num_samples: 1000000
+  wiki_num_samples: 1000  # Reduced sample count
   wiki_min_length: 20
-  wiki_max_length: 128  # 与max_length保持一致
+  wiki_max_length: 128
 
   num_workers: 4
   pin_memory: true
 
-  val_split: 0.03
+  val_split: 0.1  # Increased validation split for small data
 
 # 推理配置
 inference:
