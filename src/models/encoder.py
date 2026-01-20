@@ -33,15 +33,20 @@ class SemanticEncoder(nn.Module):
         hidden_dim: int = 512,
         kl_weight: float = 0.001,
         kl_anneal_steps: int = 10000,
+        kl_threshold: float = 0.0,
     ):
         """
-        Initialize the semantic encoder with Variational Information Bottleneck.
+        Initialize the semantic encoder with a dual-path VIB architecture.
+
+        This architecture uses a stable direct path for the main semantic signal
+        and a parallel VIB path for regularization, preventing KL collapse.
 
         Args:
             model_name: HuggingFace model name (default: "roberta-base")
             hidden_dim: Output dimension for semantic vector (default: 512)
             kl_weight: Weight for KL divergence loss (default: 0.001)
             kl_anneal_steps: Number of steps for KL annealing (default: 10000)
+            kl_threshold: Minimum KL value (free bits)
         """
         super().__init__()
 
@@ -62,30 +67,38 @@ class SemanticEncoder(nn.Module):
         # VIB parameters
         self.kl_weight = kl_weight
         self.kl_anneal_steps = kl_anneal_steps
+        self.kl_threshold = kl_threshold
         self._current_step = 0  # For KL annealing
 
-        # Variational Information Bottleneck
-        # Two separate projections for mu and logvar
-        self.mu_layer = nn.Sequential(
+        # --- Dual-Path Architecture ---
+
+        # 1. Direct Path: Stable signal for the decoder
+        self.adapter = nn.Sequential(
             nn.Linear(768, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
+            nn.Linear(hidden_dim, hidden_dim)
         )
 
-        self.logvar_layer = nn.Sequential(
-            nn.Linear(768, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
-        )
+        # 2. VIB Path: Regularization and stochasticity
+        self.mu_layer = nn.Linear(768, hidden_dim)
+        self.logvar_layer = nn.Linear(768, hidden_dim)
 
-        # Initialize logvar to small values (near-deterministic start)
-        # This prevents posterior collapse at the beginning of training
-        for layer in self.logvar_layer:
+        # --- Initialization ---
+        
+        # Initialize adapter for good initial signal
+        for layer in self.adapter:
             if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                nn.init.xavier_uniform_(layer.weight)
                 nn.init.zeros_(layer.bias)
+
+        # Initialize mu layer near zero
+        nn.init.xavier_uniform_(self.mu_layer.weight, gain=0.01)
+        nn.init.zeros_(self.mu_layer.bias)
+        
+        # Initialize logvar for very small initial sigma to prevent noise overwhelming signal
+        # CRITICAL FIX: Initialize bias to -10 to make sigma very small (~0.0067)
+        nn.init.xavier_uniform_(self.logvar_layer.weight, gain=0.001)
+        nn.init.constant_(self.logvar_layer.bias, -10.0)
 
     def forward(
         self,
@@ -94,7 +107,7 @@ class SemanticEncoder(nn.Module):
         return_kl: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
-        Extract semantic vector using Variational Information Bottleneck.
+        Extract semantic vector using the dual-path VIB architecture.
 
         Args:
             input_ids: Token IDs [batch_size, seq_len]
@@ -102,7 +115,7 @@ class SemanticEncoder(nn.Module):
             return_kl: If True, return (z, kl_loss)
 
         Returns:
-            semantic_vector: Latent vector z ~ N(mu, sigma^2) [batch_size, hidden_dim]
+            semantic_vector: Latent vector z [batch_size, hidden_dim]
             kl_loss: KL divergence per sample [batch_size] (only if return_kl=True)
         """
         # Extract RoBERTa representations
@@ -116,45 +129,51 @@ class SemanticEncoder(nn.Module):
         last_hidden_state = outputs.last_hidden_state
 
         # Mean pooling over sequence length
-        # Expand attention_mask for broadcasting: [batch_size, seq_len, 1]
         mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-
-        # Sum hidden states weighted by mask
         sum_hidden = torch.sum(last_hidden_state * mask_expanded, dim=1)
-
-        # Count actual tokens (not padding)
         token_counts = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+        mean_pooled = sum_hidden / token_counts # [batch_size, 768]
 
-        # Compute mean: [batch_size, 768]
-        mean_pooled = sum_hidden / token_counts
+        # --- Dual-Path Forward ---
 
-        # Variational Information Bottleneck
-        mu = self.mu_layer(mean_pooled)  # [batch_size, hidden_dim]
-        logvar = self.logvar_layer(mean_pooled)  # [batch_size, hidden_dim]
+        # 1. Direct path signal
+        direct_signal = self.adapter(mean_pooled)
 
-        # Clamp logvar for stability (prevent extreme values)
-        logvar = torch.clamp(logvar, min=-10, max=2)
+        # 2. VIB path for regularization
+        mu = self.mu_layer(mean_pooled)
+        logvar = self.logvar_layer(mean_pooled)
+        logvar = torch.clamp(logvar, min=-10, max=2) # Stability
 
-        # KL annealing: gradually increase KL weight over training
-        if self.training:
-            anneal_ratio = min(1.0, self._current_step / self.kl_anneal_steps)
-            current_kl_weight = self.kl_weight * anneal_ratio
-        else:
-            current_kl_weight = self.kl_weight
-
-        # Reparameterization trick: z = mu + sigma * epsilon
+        # Reparameterization trick for the VIB path
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
-            z = mu + std * eps  # [batch_size, hidden_dim]
+            vib_signal = mu + std * eps
         else:
-            # Inference: use mu (deterministic)
-            z = mu
+            # At inference, use mu from VIB path for determinism
+            vib_signal = mu
 
-        # KL divergence: D_KL(N(mu, sigma^2) || N(0, 1))
-        # = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+        # Combine signals: z = direct_path + vib_path
+        # The direct path provides a stable signal, while the VIB path adds
+        # learned, structured noise, guided by the KL loss.
+        z = direct_signal + vib_signal
+        
+        # --- KL Divergence Calculation ---
+
+        # KL annealing
+        current_kl_weight = self.kl_weight
+        if self.training:
+            anneal_ratio = min(1.0, self._current_step / self.kl_anneal_steps)
+            current_kl_weight *= anneal_ratio
+
+        # D_KL(N(mu, sigma^2) || N(0, 1))
         kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-        kl_weighted = kl_per_sample * current_kl_weight  # [batch_size]
+
+        # Apply KL threshold (free bits)
+        if self.kl_threshold > 0:
+            kl_per_sample = torch.max(kl_per_sample, torch.tensor(self.kl_threshold, device=kl_per_sample.device))
+
+        kl_weighted = kl_per_sample * current_kl_weight
 
         if return_kl:
             return z, kl_weighted
@@ -219,9 +238,9 @@ class SemanticEncoder(nn.Module):
 
 if __name__ == "__main__":
     # Quick test
-    print("Testing SemanticEncoder...")
+    print("Testing SemanticEncoder (Dual-Path VIB)...")
 
-    encoder = SemanticEncoder(model_name="roberta-base", hidden_dim=512)
+    encoder = SemanticEncoder(model_name="roberta-base", hidden_dim=512, kl_threshold=2.0)
     print("[OK] Encoder initialized")
 
     # Test forward pass
@@ -230,22 +249,31 @@ if __name__ == "__main__":
     input_ids = torch.randint(0, 50265, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
 
-    semantic_vector = encoder(input_ids, attention_mask)
+    encoder.train() # Test training mode
+    z_train, kl_loss = encoder(input_ids, attention_mask, return_kl=True)
+    print("\n--- Training Mode ---")
     print("[OK] Forward pass successful")
-    print(f"  Output shape: {semantic_vector.shape}")
-    print(f"  Expected shape: ({batch_size}, 512)")
+    print(f"  Output shape (z): {z_train.shape}")
+    print(f"  KL Loss shape:    {kl_loss.shape}")
+    assert z_train.shape == (batch_size, 512), "Training output shape mismatch!"
+    assert kl_loss.shape == (batch_size,), "KL loss shape mismatch!"
 
-    assert semantic_vector.shape == (batch_size, 512), "Output shape mismatch!"
-    print("[OK] Shape test passed")
+    encoder.eval() # Test eval mode
+    z_eval = encoder(input_ids, attention_mask)
+    print("\n--- Eval Mode ---")
+    print("[OK] Forward pass successful")
+    print(f"  Output shape (z): {z_eval.shape}")
+    assert z_eval.shape == (batch_size, 512), "Eval output shape mismatch!"
 
     # Test frozen parameters
     for name, param in encoder.roberta.named_parameters():
-        assert param.requires_grad == False, f"Parameter {name} is not frozen!"
-    print("[OK] All RoBERTa parameters are frozen")
+        assert not param.requires_grad, f"Parameter {name} is not frozen!"
+    print("\n[OK] All RoBERTa parameters are frozen")
 
-    # Test adapter is trainable
-    for name, param in encoder.adapter.named_parameters():
-        assert param.requires_grad == True, f"Adapter parameter {name} should be trainable"
-    print("[OK] Adapter is trainable")
+    # Test trainable parameters
+    assert all(p.requires_grad for p in encoder.adapter.parameters()), "Adapter should be trainable"
+    assert all(p.requires_grad for p in encoder.mu_layer.parameters()), "Mu layer should be trainable"
+    assert all(p.requires_grad for p in encoder.logvar_layer.parameters()), "Logvar layer should be trainable"
+    print("[OK] All projection layers are trainable")
 
     print("\n[SUCCESS] All tests passed!")

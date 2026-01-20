@@ -8,11 +8,11 @@ model:
   semantic_dim: 512
 
   # VIB Configuration (now default behavior)
-  kl_weight: 0.001  # Conservative KL weight
+  kl_weight: 0.2  # Conservative KL weight
   kl_anneal_steps: 10000  # Anneal KL weight over first 10K steps
 
   # Decoder 配置
-  num_layers: 6
+  num_layers: 2
   num_heads: 8
   ffn_dim: 2048
   max_length: 128
@@ -31,7 +31,7 @@ training:
   learning_rate: 0.00015
   weight_decay: 0.01
   batch_size: 64
-  num_epochs: 5
+  num_epochs: 50
   gradient_accumulation_steps: 2
   grad_clip: 1.0
 
@@ -44,7 +44,7 @@ training:
   log_interval: 20
   save_interval: 1000
   eval_interval: 200
-  save_epochs: 1
+  save_epochs: 10
 
   use_wandb: true
   wandb_project: "sgdd-vib"
@@ -57,14 +57,14 @@ data:
   mixing_strategy: "fast_validation"
   total_samples: 100
 
-  wiki_num_samples: 600
+  wiki_num_samples: 6000
   wiki_min_length: 20
   wiki_max_length: 128
 
-  alpaca_num_samples: 300
+  alpaca_num_samples: 3000
   alpaca_min_length: 20
 
-  oasst1_num_samples: 100
+  oasst1_num_samples: 1000
   oasst1_min_length: 20
 
   num_workers: 4

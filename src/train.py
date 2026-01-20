@@ -399,7 +399,7 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         # 保存最佳模型 (基于验证loss,越小越好)
         # evaluate_generation返回{"loss": avg_loss, "perplexity": perplexity}
         val_loss = val_metrics.get("loss", float('inf'))
-        if val_loss < best_metric:
+        if val_loss < best_metric and epoch >=5:  # 只在前5个epoch后考虑保存最佳模型
             best_metric = val_loss
             save_best_model(
                 model,
