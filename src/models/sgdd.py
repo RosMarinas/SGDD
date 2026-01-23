@@ -21,30 +21,31 @@ from .diffusion import CosineNoiseSchedule, DiscreteDiffusion
 class SGDDConfig:
     """Configuration for SGDD model"""
     # Encoder
-    encoder_model: str = "roberta-base"
-    hidden_dim: int = 512
+    encoder_model: str = "BAAI/bge-m3"
+    semantic_dim: int = 1024  # High dimension to preserve semantics
     kl_weight: float = 0.001  # KL divergence weight
     kl_anneal_steps: int = 10000  # KL annealing steps
     whitening_stats_path: Optional[str] = None
 
 
     # Decoder
-    num_layers: int = 6
-    num_heads: int = 8
-    ffn_dim: int = 2048
-    max_len: int = 128  # Increased from 64 to 128 for better length learning
+    decoder_dim: int = 256  # Reduced dimension for lightweight model
+    num_layers: int = 2  # Reduced layers
+    num_heads: int = 4  # 256 / 64 = 4 heads
+    ffn_dim: int = 1024  # 4 * 256
+    max_len: int = 128
     dropout: float = 0.1
 
     # Diffusion
     num_diffusion_steps: int = 1000
-    vocab_size: int = 50265
+    vocab_size: int = 250002  # BGE-M3 / XLM-R vocab size
 
     # Training
     cfg_prob: float = 0.1  # Probability of unconditional training (CFG)
     use_self_conditioning: bool = True  # Enable self-conditioning during training
     compute_pad_loss: bool = False  # Compute loss on PAD positions (teaches model to output PAD)
     compute_eos_loss: bool = True  # Compute loss on EOS positions (teaches model to output EOS)
-    eos_token_id: int = 2  # RoBERTa EOS token ID
+    eos_token_id: int = 2  # RoBERTa / XLM-R EOS token ID
 
 
 class SGDDModel(nn.Module):
@@ -52,7 +53,7 @@ class SGDDModel(nn.Module):
     Semantic-Guided Discrete Diffusion Model.
 
     Combines:
-    - Frozen semantic encoder (RoBERTa)
+    - Frozen semantic encoder (RoBERTa / BGE-M3)
     - Noise schedule (cosine)
     - Trainable diffusion decoder
 
@@ -72,34 +73,36 @@ class SGDDModel(nn.Module):
         # Semantic encoder (frozen) with Variational Information Bottleneck
         self.encoder = SemanticEncoder(
             model_name=config.encoder_model,
-            hidden_dim=config.hidden_dim,
+            hidden_dim=config.semantic_dim,  # Output dimension of encoder (VIB)
             kl_weight=config.kl_weight,
             kl_anneal_steps=config.kl_anneal_steps,
             whitening_stats_path=config.whitening_stats_path,
         )
 
-        # Decoder Embedding Initialization with Pretrained RoBERTa Weights
-        # CRITICAL: Initialize decoder embeddings with projected RoBERTa embeddings
-        # This provides:
-        # 1. Better convergence (start from good semantic representations)
-        # 2. Better rare token handling (pretrained knowledge)
-        # 3. Faster training (don't learn 50k+ embeddings from scratch)
-        roberta_embeddings_proj = self._project_roberta_embeddings(
-            self.encoder.roberta.embeddings.word_embeddings.weight,
-            source_dim=768,
-            target_dim=config.hidden_dim,
+        # Decoder Embedding Initialization with Pretrained Encoder Weights
+        # Initialize decoder embeddings with projected encoder embeddings
+        # Source: Encoder Dim (1024) -> Target: Decoder Dim (256)
+        
+        # Get source dimension from encoder
+        source_dim = self.encoder.input_dim
+        
+        encoder_embeddings_proj = self._project_embeddings(
+            self.encoder.model.embeddings.word_embeddings.weight,
+            source_dim=source_dim,
+            target_dim=config.decoder_dim,
         )
 
         # Diffusion decoder (trainable)
         self.decoder = DiffusionDecoder(
             vocab_size=config.vocab_size,
-            hidden_dim=config.hidden_dim,
+            hidden_dim=config.decoder_dim,
+            semantic_dim=config.semantic_dim,
             num_layers=config.num_layers,
             num_heads=config.num_heads,
             ffn_dim=config.ffn_dim,
             max_len=config.max_len,
             dropout=config.dropout,
-            roberta_embeddings=roberta_embeddings_proj,
+            roberta_embeddings=encoder_embeddings_proj,
         )
 
         # Noise schedule
@@ -242,28 +245,28 @@ class SGDDModel(nn.Module):
 
         return total_loss
 
-    def _project_roberta_embeddings(
+    def _project_embeddings(
         self,
-        roberta_embeddings: torch.Tensor,
-        source_dim: int = 768,
+        encoder_embeddings: torch.Tensor,
+        source_dim: int,
         target_dim: int = 512,
     ) -> torch.Tensor:
         """
-        Project RoBERTa embeddings from source_dim to target_dim for decoder initialization.
+        Project encoder embeddings from source_dim to target_dim for decoder initialization.
 
         Uses a simple linear projection (without bias) to preserve semantic structure
         while reducing dimensionality. This is done once during initialization and
         the projection matrix is discarded afterwards.
 
         Args:
-            roberta_embeddings: RoBERTa word embeddings [vocab_size, source_dim]
-            source_dim: Source dimension (768 for RoBERTa-base)
+            encoder_embeddings: Source word embeddings [vocab_size, source_dim]
+            source_dim: Source dimension (768 for RoBERTa, 1024 for BGE-M3)
             target_dim: Target dimension (512 for decoder)
 
         Returns:
             projected_embeddings: Projected embeddings [vocab_size, target_dim]
         """
-        device = roberta_embeddings.device
+        device = encoder_embeddings.device
 
         # Create a projection layer without bias
         # Using Xavier initialization for better gradient flow
@@ -275,7 +278,7 @@ class SGDDModel(nn.Module):
 
         # Project embeddings: [vocab_size, source_dim] -> [vocab_size, target_dim]
         with torch.no_grad():
-            projected_embeddings = projection(roberta_embeddings)
+            projected_embeddings = projection(encoder_embeddings)
 
         # Clean up: we don't need the projection layer anymore
         del projection
@@ -499,9 +502,38 @@ if __name__ == "__main__":
     # Quick test
     print("Testing SGDDModel...")
 
-    config = SGDDConfig()
-    model = SGDDModel(config)
-    print("[OK] Model initialized")
+    # Note: Default config now uses BGE-M3 which requires internet or cache
+    # If it fails, fallback to roberta for basic testing
+    try:
+        config = SGDDConfig()
+        model = SGDDModel(config)
+        print(f"[OK] Model initialized with {config.encoder_model}")
+        
+        # Test forward pass with correct vocab size
+        vocab_size = config.vocab_size
+        batch_size = 2
+        seq_len = 64
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+        attention_mask = torch.ones_like(input_ids)
+
+        logits, target_tokens, loss_mask, kl_loss = model(input_ids, attention_mask, cfg_uncond=True)
+        print(f"[OK] Forward pass successful")
+        print(f"  Logits shape: {logits.shape}")
+        
+    except Exception as e:
+        print(f"Warning: BGE-M3 load failed ({e}). Testing with roberta-base.")
+        config = SGDDConfig(encoder_model="roberta-base", vocab_size=50265)
+        model = SGDDModel(config)
+        print("[OK] Model initialized with roberta-base fallback")
+        
+        vocab_size = 50265
+        batch_size = 2
+        seq_len = 64
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+        attention_mask = torch.ones_like(input_ids)
+        
+        logits, target_tokens, loss_mask, kl_loss = model(input_ids, attention_mask, cfg_uncond=True)
+        print(f"[OK] Forward pass successful")
 
     # Count parameters
     total_params = model.get_num_params()
@@ -509,20 +541,8 @@ if __name__ == "__main__":
     print(f"  Total parameters: {total_params:,}")
     print(f"  Trainable parameters: {trainable_params:,}")
 
-    # Test forward pass
-    batch_size = 2
-    seq_len = 64
-    input_ids = torch.randint(0, 50265, (batch_size, seq_len))
-    attention_mask = torch.ones_like(input_ids)
-
-    logits, target_tokens, loss_mask = model(input_ids, attention_mask, cfg_uncond=True)
-    print(f"[OK] Forward pass successful")
-    print(f"  Logits shape: {logits.shape}")
-    print(f"  Target tokens shape: {target_tokens.shape}")
-    print(f"  Loss mask shape: {loss_mask.shape}")
-
     # Test loss computation
-    loss = model.compute_loss(logits, target_tokens, loss_mask)
+    loss = model.compute_loss(logits, target_tokens, loss_mask, kl_loss)
     print(f"[OK] Loss computed: {loss.item():.4f}")
 
     # Test generation (simple)

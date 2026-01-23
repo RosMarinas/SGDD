@@ -123,13 +123,16 @@ def train_epoch(
         is_accumulation_step = (batch_idx + 1) % config.training.gradient_accumulation_steps == 0
         is_last_batch = (batch_idx + 1) == len(dataloader)
 
+        current_grad_norm = 0.0 # 初始化当前步的梯度范数
+
         if is_accumulation_step or is_last_batch:
             # 梯度裁剪:只在更新前裁剪一次(对累积后的总梯度进行裁剪)
             if config.training.grad_clip > 0:
                 if scaler is not None:
                     scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
-
+                # 捕获梯度范数
+                current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip).item()
+            
             # 更新参数
             if scaler is not None:
                 scaler.step(optimizer)
@@ -162,14 +165,30 @@ def train_epoch(
             avg_kl = total_kl_loss / num_batches
             step = epoch * len(dataloader) + batch_idx + 1
             if config.training.use_wandb:
-                wandb.log({
+                # 计算当前 KL 权重 (用于日志)
+                kl_anneal_ratio = min(1.0, model.encoder._current_step / model.encoder.kl_anneal_steps)
+                current_kl_weight = model.encoder.kl_weight * kl_anneal_ratio
+                
+                log_dict = {
                     "train/loss": avg_loss,  # 当前epoch的累计平均loss
                     "train/reconstruction_loss": avg_loss - avg_kl,
                     "train/kl_loss": avg_kl,
+                    "train/unweighted_kl": avg_kl / current_kl_weight if current_kl_weight > 0 else 0.0,
+                    "train/kl_weight": current_kl_weight,
                     "train/batch_loss": raw_loss,  # 当前batch的瞬时loss
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                     "train/step": step,
-                })
+                }
+                
+                # 记录梯度范数 (如果这一步进行了更新)
+                if current_grad_norm > 0:
+                    log_dict["train/grad_norm"] = current_grad_norm
+                
+                # 记录scaler scale
+                if scaler is not None:
+                    log_dict["train/scaler_scale"] = scaler.get_scale()
+                
+                wandb.log(log_dict)
 
     # 返回平均损失
     avg_loss = total_loss / num_batches
@@ -229,7 +248,8 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
 
     model_config = ModelConfig(
         encoder_model=config.model.encoder_name,
-        hidden_dim=config.model.semantic_dim,
+        semantic_dim=config.model.semantic_dim,
+        decoder_dim=config.model.decoder_dim,
         num_layers=config.model.num_layers,
         num_heads=config.model.num_heads,
         ffn_dim=config.model.ffn_dim,
@@ -245,6 +265,12 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         kl_anneal_steps=getattr(config.model, 'kl_anneal_steps', 10000),
     )
     model = SGDDModel(model_config).to(device)
+    
+    # 监控模型梯度和参数 (仅限解码器，因为编码器大部分参数已冻结)
+    # log="all" 会记录参数直方图和梯度直方图
+    # log_freq 决定了记录的频率
+    if config.training.use_wandb:
+        wandb.watch(model.decoder, log="all", log_freq=config.training.log_interval)
 
     total_params = model.get_num_params()
     trainable_params = model.get_num_trainable_params()

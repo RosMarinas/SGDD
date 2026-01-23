@@ -30,16 +30,19 @@ def visualize_encoder_steps():
         print(f"Found whitening stats at {whitening_path}")
 
     # Initialize Encoder
-    print("Initializing SemanticEncoder...")
+    print("Initializing SemanticEncoder with BGE-M3...")
     encoder = SemanticEncoder(
-        model_name="roberta-base", 
-        hidden_dim=512,
+        model_name="BAAI/bge-m3", 
+        hidden_dim=1024,  # New standard dimension
         whitening_stats_path=whitening_path
     )
     encoder.eval()
     
+    input_dim = encoder.input_dim
+    print(f"Model Input Dimension: {input_dim}")
+    
     # Input Data
-    text = "The quick brown fox jumps over the lazy dog."
+    text = "Output dimension for semantic vector"
     print(f"Input text: {text}")
     
     tokenizer = encoder.tokenizer
@@ -50,92 +53,100 @@ def visualize_encoder_steps():
     print("Executing manual forward pass to capture intermediates...")
     
     with torch.no_grad():
-        # 1. RoBERTa Output
-        outputs = encoder.roberta(
+        # 1. Base Model Output
+        outputs = encoder.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True
         )
-        last_hidden_state = outputs.last_hidden_state # [1, seq_len, 768]
+        last_hidden_state = outputs.last_hidden_state # [1, seq_len, input_dim]
         
-        # 2. Mean Pooling Output
-        mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-        sum_hidden = torch.sum(last_hidden_state * mask_expanded, dim=1)
-        token_counts = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
-        raw_mean_pooled = sum_hidden / token_counts # [1, 768]
+        # 2. CLS Pooling Output (First Token)
+        cls_pooled = last_hidden_state[:, 0, :] # [1, input_dim]
         
-        # 3. Whitened Output
-        # Logic copied from SemanticEncoder.forward
+        # 3. Whitened Output (if enabled)
         if encoder.use_whitening:
-            whitened_pooled = torch.matmul(raw_mean_pooled - encoder.whitening_mean, encoder.whitening_matrix.t())
+            whitened_pooled = torch.matmul(cls_pooled - encoder.whitening_mean, encoder.whitening_matrix.t())
         else:
-            whitened_pooled = raw_mean_pooled
+            whitened_pooled = cls_pooled
             
-        # 4. VIB Output (Final z)
+        # 4. Dual-Path Outputs
         # Direct Path
-        direct_signal = encoder.adapter(whitened_pooled)
+        direct_signal = encoder.adapter(whitened_pooled) # [1, 1024]
         
         # VIB Path
-        mu = encoder.mu_layer(whitened_pooled)
+        mu = encoder.mu_layer(whitened_pooled) # [1, 1024]
         vib_signal = mu # Inference mode
         
-        z = direct_signal + vib_signal # [1, 512]
+        # Final z
+        z = direct_signal + vib_signal # [1, 1024]
         
     # Convert to numpy
-    hidden_np = last_hidden_state[0].numpy()      # [seq, 768]
-    raw_pooled_np = raw_mean_pooled[0].numpy()    # [768]
-    whitened_np = whitened_pooled[0].numpy()      # [768]
-    z_np = z[0].numpy()                           # [512]
+    hidden_np = last_hidden_state[0].cpu().numpy()      # [seq, input_dim]
+    cls_pooled_np = cls_pooled[0].cpu().numpy()         # [input_dim]
+    direct_np = direct_signal[0].cpu().numpy()          # [1024]
+    vib_np = vib_signal[0].cpu().numpy()                # [1024]
+    z_np = z[0].cpu().numpy()                           # [1024]
     
     # Visualization
-    plt.figure(figsize=(15, 16))
+    plt.figure(figsize=(15, 20))
     
-    # Plot 1: RoBERTa Last Hidden State (Heatmap)
-    plt.subplot(4, 1, 1)
+    # Plot 1: Encoder Last Hidden State (Heatmap)
+    plt.subplot(5, 1, 1)
     sns.heatmap(hidden_np, cmap="viridis", cbar=True)
     tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
     plt.yticks(ticks=np.arange(len(tokens)) + 0.5, labels=tokens, rotation=0)
-    plt.title(f"1. RoBERTa Last Hidden State (Shape: {hidden_np.shape})")
-    plt.xlabel("Hidden Dimension (768)")
+    plt.title(f"1. BGE-M3 Last Hidden State (Shape: {hidden_np.shape})")
+    plt.xlabel(f"Hidden Dimension ({input_dim})")
     
-    # Plot 2: Raw Mean Pooled Output
-    plt.subplot(4, 1, 2)
-    plt.plot(raw_pooled_np, alpha=0.7, color='blue', linewidth=0.5)
-    plt.title(f"2. Mean Pooled Output (Raw) - Avg: {raw_pooled_np.mean():.4f}, Std: {raw_pooled_np.std():.4f}")
-    plt.xlim(0, 768)
+    # Plot 2: CLS Pooled Output
+    plt.subplot(5, 1, 2)
+    plt.plot(cls_pooled_np, alpha=0.8, color='blue', linewidth=0.5)
+    plt.title(f"2. CLS Vector (Pooled) - Avg: {cls_pooled_np.mean():.4f}, Std: {cls_pooled_np.std():.4f}")
+    plt.xlim(0, input_dim)
     plt.grid(True, alpha=0.3)
 
-    # Plot 3: Whitened Output
-    plt.subplot(4, 1, 3)
-    plt.plot(whitened_np, alpha=0.7, color='green', linewidth=0.5)
-    plt.title(f"3. Whitened Output (ZCA) - Avg: {whitened_np.mean():.4f}, Std: {whitened_np.std():.4f}")
-    plt.xlim(0, 768)
+    # Plot 3: Direct Path Output
+    plt.subplot(5, 1, 3)
+    plt.plot(direct_np, alpha=0.8, color='green', linewidth=0.5)
+    plt.title(f"3. Direct Path Output (Adapter) - Avg: {direct_np.mean():.4f}, Std: {direct_np.std():.4f}")
+    plt.xlim(0, 1024)
     plt.grid(True, alpha=0.3)
     
-    # Plot 4: VIB Output (Final z)
-    plt.subplot(4, 1, 4)
-    plt.plot(z_np, alpha=0.7, color='red', linewidth=0.5)
-    plt.title(f"4. VIB Final Output z (Shape: {z_np.shape}) - Avg: {z_np.mean():.4f}, Std: {z_np.std():.4f}")
-    plt.xlim(0, 512)
+    # Plot 4: VIB Path Output
+    plt.subplot(5, 1, 4)
+    plt.plot(vib_np, alpha=0.8, color='orange', linewidth=0.5)
+    plt.title(f"4. VIB Path Output (Mu) - Avg: {vib_np.mean():.4f}, Std: {vib_np.std():.4f}")
+    plt.xlim(0, 1024)
+    plt.grid(True, alpha=0.3)
+    
+    # Plot 5: Final Combined Output (z)
+    plt.subplot(5, 1, 5)
+    plt.plot(z_np, alpha=0.8, color='red', linewidth=0.5)
+    plt.title(f"5. Final Semantic Vector z (Direct + VIB) - Avg: {z_np.mean():.4f}, Std: {z_np.std():.4f}")
+    plt.xlim(0, 1024)
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    save_path = os.path.join(output_dir, "encoder_steps_visualization.png")
+    save_path = os.path.join(output_dir, "bge_m3_dual_path_visualization.png")
     plt.savefig(save_path)
     print(f"\nVisualization saved to: {save_path}")
     
     # Print numerical stats
     print("\n--- Statistics ---")
-    print("1. RoBERTa Hidden State:")
+    print("1. BGE-M3 Hidden State:")
     print(f"   Shape: {hidden_np.shape}")
     print(f"   Range: [{hidden_np.min():.4f}, {hidden_np.max():.4f}]")
-    print("2. Raw Mean Pooled:")
-    print(f"   Shape: {raw_pooled_np.shape}")
-    print(f"   Range: [{raw_pooled_np.min():.4f}, {raw_pooled_np.max():.4f}]")
-    print("3. Whitened Output:")
-    print(f"   Shape: {whitened_np.shape}")
-    print(f"   Range: [{whitened_np.min():.4f}, {whitened_np.max():.4f}]")
-    print("4. VIB Output (z):")
+    print("2. CLS Vector:")
+    print(f"   Shape: {cls_pooled_np.shape}")
+    print(f"   Range: [{cls_pooled_np.min():.4f}, {cls_pooled_np.max():.4f}]")
+    print("3. Direct Path:")
+    print(f"   Shape: {direct_np.shape}")
+    print(f"   Range: [{direct_np.min():.4f}, {direct_np.max():.4f}]")
+    print("4. VIB Path:")
+    print(f"   Shape: {vib_np.shape}")
+    print(f"   Range: [{vib_np.min():.4f}, {vib_np.max():.4f}]")
+    print("5. Final z:")
     print(f"   Shape: {z_np.shape}")
     print(f"   Range: [{z_np.min():.4f}, {z_np.max():.4f}]")
 if __name__ == "__main__":

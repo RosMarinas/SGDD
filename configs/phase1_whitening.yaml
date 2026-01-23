@@ -4,19 +4,20 @@
 
 # Model Config
 model:
-  encoder_name: "roberta-base"
+  encoder_name: "BAAI/bge-m3"
   encoder_freeze: true
-  semantic_dim: 512
-  whitening_stats_path: "data/whitening_stats.pt" # Enable Whitening
+  semantic_dim: 1024
+  decoder_dim: 256
+  # whitening_stats_path: "data/whitening_stats.pt" # Disabled for BGE-M3 (better space)
 
   # VIB Configuration
   kl_weight: 0.1
   kl_anneal_steps: 600
 
   # Decoder
-  num_layers: 4
-  num_heads: 8
-  ffn_dim: 2048
+  num_layers: 2
+  num_heads: 4
+  ffn_dim: 1024
   max_length: 128
   dropout: 0.1
 

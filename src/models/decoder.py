@@ -229,23 +229,25 @@ class AdaLNModulator(nn.Module):
     Based on: "Scalable Diffusion Models with Transformers" (DiT, Peebles et al., ICCV 2023)
     """
 
-    def __init__(self, hidden_dim: int = 512, num_layers: int = 6):
+    def __init__(self, hidden_dim: int = 512, semantic_dim: int = 512, num_layers: int = 6):
         """
         Initialize AdaLN modulator.
 
         Args:
-            hidden_dim: Hidden dimension
+            hidden_dim: Hidden dimension (decoder state size)
+            semantic_dim: Semantic vector dimension (input condition size)
             num_layers: Number of decoder layers
         """
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.semantic_dim = semantic_dim
         self.num_layers = num_layers
 
         # MLP: [time_emb, Z] -> modulation parameters
-        # Input: hidden_dim * 2 (time + semantic vector)
+        # Input: hidden_dim (time) + semantic_dim (Z)
         # Output: num_layers * 4 * hidden_dim (scale/shift for 2 norms per layer)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim * 4),
+            nn.Linear(hidden_dim + semantic_dim, hidden_dim * 4),
             nn.SiLU(),
             nn.Linear(hidden_dim * 4, num_layers * 4 * hidden_dim)
         )
@@ -487,6 +489,7 @@ class DiffusionDecoder(nn.Module):
         self,
         vocab_size: int = 50265,
         hidden_dim: int = 512,
+        semantic_dim: int = 512,
         num_layers: int = 6,
         num_heads: int = 8,
         ffn_dim: int = 2048,
@@ -499,7 +502,8 @@ class DiffusionDecoder(nn.Module):
 
         Args:
             vocab_size: Size of vocabulary
-            hidden_dim: Hidden dimension
+            hidden_dim: Hidden dimension (decoder state)
+            semantic_dim: Semantic vector dimension (condition)
             num_layers: Number of decoder layers
             num_heads: Number of attention heads
             ffn_dim: Feed-forward network dimension
@@ -509,6 +513,7 @@ class DiffusionDecoder(nn.Module):
         """
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.semantic_dim = semantic_dim
         self.vocab_size = vocab_size
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -525,7 +530,7 @@ class DiffusionDecoder(nn.Module):
         self.time_emb = SinusoidalTimeEmbedding(hidden_dim)
 
         # AdaLN modulator: maps [time, semantic_vector] to layer parameters
-        self.modulator = AdaLNModulator(hidden_dim, num_layers)
+        self.modulator = AdaLNModulator(hidden_dim, semantic_dim, num_layers)
 
         # AdaLN decoder layers (no cross-attention)
         self.layers = nn.ModuleList([
@@ -613,7 +618,7 @@ if __name__ == "__main__":
 
     # Test AdaLNModulator
     print("\n2. Testing AdaLNModulator...")
-    modulator = AdaLNModulator(hidden_dim=512, num_layers=6)
+    modulator = AdaLNModulator(hidden_dim=512, semantic_dim=1024, num_layers=6)
     print("[OK] AdaLNModulator initialized")
 
     # Test AdaLNDecoderLayer
@@ -642,6 +647,7 @@ if __name__ == "__main__":
     decoder = DiffusionDecoder(
         vocab_size=50265,
         hidden_dim=512,
+        semantic_dim=1024,
         num_layers=6,
         num_heads=8,
         max_len=64,
@@ -656,7 +662,7 @@ if __name__ == "__main__":
 
     # Test forward pass without self-conditioning
     input_ids = torch.randint(0, 50265, (batch_size, seq_len))
-    semantic_vector = torch.randn(batch_size, 512)
+    semantic_vector = torch.randn(batch_size, 1024)
     timestep = torch.randint(0, 1000, (batch_size,))
 
     logits = decoder(input_ids, semantic_vector, timestep, prev_pred=None)

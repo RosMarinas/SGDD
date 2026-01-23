@@ -3,23 +3,24 @@
 
 # 模型配置
 model:
-  encoder_name: "roberta-base"
+  encoder_name: "BAAI/bge-m3"
   encoder_freeze: true
-  semantic_dim: 512
-
+  semantic_dim: 1024  # High semantic dimension
+  decoder_dim: 256    # Lightweight decoder
+  
   # VIB Configuration (now default behavior)
   kl_weight: 0.2  # Conservative KL weight
   kl_anneal_steps: 800  # Anneal KL weight over first 10K steps
 
   # Decoder 配置
   num_layers: 2
-  num_heads: 8
-  ffn_dim: 2048
+  num_heads: 4
+  ffn_dim: 1024
   max_length: 128
   dropout: 0.1
 
   # Diffusion 配置
-  # 使用 256 个时间步的噪声调度（训练和推理都用这个范围）
+
   num_diffusion_steps: 1000
   noise_schedule: "cosine"
 
@@ -32,9 +33,9 @@ model:
 training:
   learning_rate: 0.00015
   weight_decay: 0.01
-  batch_size: 64
+  batch_size: 16
   num_epochs: 50
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 4
   grad_clip: 1.0
 
   lr_scheduler: "cosine"
@@ -48,7 +49,7 @@ training:
   save_epochs: 10
 
   use_wandb: true
-  wandb_project: "sgdd-vib"
+  wandb_project: "sgdd-vib-bge"
   wandb_entity: null
   wandb_run_name: "phase1_vib_experiment"
 
@@ -65,12 +66,12 @@ data:
   wiki_max_token_length: 128  # 添加这个参数以匹配模型 max_length
 
   # Alpaca 配置
-  alpaca_num_samples: 3000
+  alpaca_num_samples: 30000
   alpaca_min_length: 20
   alpaca_max_token_length: 128  # 添加这个参数
 
   # OASST1 配置
-  oasst1_num_samples: 1000
+  oasst1_num_samples: 30000
   oasst1_min_length: 20
   oasst1_max_token_length: 128  # 添加这个参数
 
@@ -93,5 +94,5 @@ inference:
 seed: 42
 device: "cuda"
 checkpoint_dir: "checkpoints/phase1_vib"
-log_dir: "logs/phase1_vib"
+log_dir: "logs/phase1_vib_bge"
 task: "reconstruction"

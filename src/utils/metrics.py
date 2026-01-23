@@ -247,7 +247,7 @@ def evaluate_generation(
                 target_mask = attention_mask
 
             # 前向传播
-            semantic_vector = model.encoder.encode_from_tokens(input_ids, attention_mask)
+            semantic_vector = model.encoder(input_ids, attention_mask)
             logits = model.decoder(target_ids, semantic_vector, timestep=torch.zeros(input_ids.size(0), dtype=torch.long, device=device))
 
             # 计算损失

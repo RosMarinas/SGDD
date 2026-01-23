@@ -14,9 +14,9 @@ class ModelConfig:
     """模型架构配置"""
 
     # 编码器配置
-    encoder_name: str = "roberta-base"
+    encoder_name: str = "BAAI/bge-m3"
     encoder_freeze: bool = True
-    semantic_dim: int = 512  # 对应 SGDDConfig 的 hidden_dim
+    semantic_dim: int = 1024  # Semantic vector dimension (VIB output)
 
     # VIB配置
     kl_weight: float = 0.001  # KL divergence weight
@@ -24,9 +24,10 @@ class ModelConfig:
     whitening_stats_path: Optional[str] = None  # Path to whitening statistics file
 
     # 解码器配置 (字段名与 SGDDConfig 保持一致)
-    num_layers: int = 6  # 对应 SGDDConfig 的 num_layers
-    num_heads: int = 8  # 对应 SGDDConfig 的 num_heads
-    ffn_dim: int = 2048  # 对应 SGDDConfig 的 ffn_dim
+    decoder_dim: int = 256  # Decoder hidden dimension (Lightweight: 256)
+    num_layers: int = 2  # Lightweight: 2 layers
+    num_heads: int = 4  # Lightweight: 4 heads
+    ffn_dim: int = 1024  # Lightweight: 1024
     max_length: int = 128  # 对应 SGDDConfig 的 max_len
     dropout: float = 0.1  # 对应 SGDDConfig 的 dropout
 
@@ -86,6 +87,7 @@ class DataConfig:
     wiki_num_samples: int = 100000
     wiki_min_length: int = 20
     wiki_max_length: int = 128
+    wiki_max_token_length: int = 128  # Added to match YAML config
 
     # QQP配置
     qqp_num_samples: int = 100000
@@ -98,10 +100,12 @@ class DataConfig:
     # Alpaca配置
     alpaca_num_samples: int = 0
     alpaca_min_length: int = 20
+    alpaca_max_token_length: int = 128  # Added to match YAML config
 
     # OpenAssistant配置
     oasst1_num_samples: int = 0
     oasst1_min_length: int = 20
+    oasst1_max_token_length: int = 128  # Added to match YAML config
 
     # 数据加载
     num_workers: int = 4
@@ -193,7 +197,8 @@ class SGDDConfig:
         # 模型配置
         lines.append("\n[Model]")
         lines.append(f"  Encoder: {self.model.encoder_name} (frozen={self.model.encoder_freeze})")
-        lines.append(f"  Decoder: {self.model.num_layers} layers, {self.model.semantic_dim} dim, {self.model.num_heads} heads")
+        lines.append(f"  Semantic Dim: {self.model.semantic_dim}")
+        lines.append(f"  Decoder: {self.model.num_layers} layers, {self.model.decoder_dim} dim, {self.model.num_heads} heads")
         lines.append(f"  Max Length: {self.model.max_length}")
         lines.append(f"  Diffusion Steps: {self.model.num_diffusion_steps}")
         lines.append(f"  Self-Conditioning: {self.model.use_self_conditioning}")
