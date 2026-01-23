@@ -8,6 +8,7 @@ to extract deep semantic representations from input text via mean pooling.
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
+import os
 
 
 class SemanticEncoder(nn.Module):
@@ -34,6 +35,7 @@ class SemanticEncoder(nn.Module):
         kl_weight: float = 0.001,
         kl_anneal_steps: int = 10000,
         kl_threshold: float = 0.0,
+        whitening_stats_path: str = None,
     ):
         """
         Initialize the semantic encoder with a dual-path VIB architecture.
@@ -47,6 +49,7 @@ class SemanticEncoder(nn.Module):
             kl_weight: Weight for KL divergence loss (default: 0.001)
             kl_anneal_steps: Number of steps for KL annealing (default: 10000)
             kl_threshold: Minimum KL value (free bits)
+            whitening_stats_path: Path to whitening statistics file (optional)
         """
         super().__init__()
 
@@ -69,6 +72,19 @@ class SemanticEncoder(nn.Module):
         self.kl_anneal_steps = kl_anneal_steps
         self.kl_threshold = kl_threshold
         self._current_step = 0  # For KL annealing
+
+        # --- Whitening (Optimization) ---
+        self.register_buffer("whitening_mean", torch.zeros(768))
+        self.register_buffer("whitening_matrix", torch.eye(768))
+        self.use_whitening = False
+
+        if whitening_stats_path and os.path.exists(whitening_stats_path):
+            print(f"Loading whitening stats from {whitening_stats_path}...")
+            stats = torch.load(whitening_stats_path, map_location="cpu")
+            self.whitening_mean.copy_(stats["mean"])
+            self.whitening_matrix.copy_(stats["whitening_matrix"])
+            self.use_whitening = True
+            print("Whitening enabled.")
 
         # --- Dual-Path Architecture ---
 
@@ -133,6 +149,12 @@ class SemanticEncoder(nn.Module):
         sum_hidden = torch.sum(last_hidden_state * mask_expanded, dim=1)
         token_counts = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
         mean_pooled = sum_hidden / token_counts # [batch_size, 768]
+
+        # --- Whitening ---
+        if self.use_whitening:
+            # Apply (x - mu) W^T
+            # Note: whitening_matrix is W, we use linear transformation convention x @ W.T
+            mean_pooled = torch.matmul(mean_pooled - self.whitening_mean, self.whitening_matrix.t())
 
         # --- Dual-Path Forward ---
 

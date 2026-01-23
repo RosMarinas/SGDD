@@ -25,6 +25,8 @@ class SGDDConfig:
     hidden_dim: int = 512
     kl_weight: float = 0.001  # KL divergence weight
     kl_anneal_steps: int = 10000  # KL annealing steps
+    whitening_stats_path: Optional[str] = None
+
 
     # Decoder
     num_layers: int = 6
@@ -73,6 +75,7 @@ class SGDDModel(nn.Module):
             hidden_dim=config.hidden_dim,
             kl_weight=config.kl_weight,
             kl_anneal_steps=config.kl_anneal_steps,
+            whitening_stats_path=config.whitening_stats_path,
         )
 
         # Decoder Embedding Initialization with Pretrained RoBERTa Weights
@@ -141,8 +144,15 @@ class SGDDModel(nn.Module):
         device = input_ids.device
 
         # Sample random timestep if not provided
+        # IMPORTANT: Use squared sampling to bias towards high timesteps (more MASK)
+        # This ensures the model learns to generate from heavily corrupted inputs,
+        # which is crucial for inference where we start from all MASK tokens.
+        # Without this bias, the model would only see 50% MASK at t=500 and
+        # fail to learn to rely on semantic vector z for generation.
         if timestep is None:
+            # Sample from [0, 1] with square bias towards 1 (high corruption)
             timestep = torch.rand(batch_size, device=device)
+            timestep = timestep ** 0.5  # Square root bias: higher timesteps more likely
             # Convert to discrete timestep
             timestep = (timestep * self.noise_schedule.num_timesteps).long()
 

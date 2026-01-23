@@ -175,6 +175,9 @@ def main():
     model_config = ModelConfig(
         encoder_model=config.model.encoder_name,
         hidden_dim=config.model.semantic_dim,
+        kl_weight=config.model.kl_weight,
+        kl_anneal_steps=config.model.kl_anneal_steps,
+        whitening_stats_path=config.model.whitening_stats_path,
         num_layers=config.model.num_layers,
         num_heads=config.model.num_heads,
         ffn_dim=config.model.ffn_dim,
@@ -185,30 +188,47 @@ def main():
         cfg_prob=0.0,  # 评估时不需要CFG dropout
         use_self_conditioning=config.model.use_self_conditioning,
         compute_pad_loss=config.model.compute_pad_loss,
+        compute_eos_loss=config.model.compute_eos_loss,
     )
 
     # 创建模型
     model = SGDDModel(model_config).to(device)
 
-    # 加载最佳模型
-    try:
-        best_metric = load_best_model(checkpoint_path, model, device)
-        print(f"Model loaded successfully (best metric: {best_metric:.4f})")
-    except FileNotFoundError:
-        print(f"Warning: Best model not found, looking for latest checkpoint...")
-        # 尝试加载最新检查点
-        checkpoint_dir = Path(checkpoint_path)
-        checkpoints = list(checkpoint_dir.glob("checkpoint_*.pt"))
-        if checkpoints:
-            checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            checkpoint_file = checkpoints[0]
-            print(f"Loading checkpoint: {checkpoint_file}")
-            checkpoint = torch.load(checkpoint_file, map_location=device)
+    # 加载模型
+    checkpoint_path = Path(checkpoint_path)
+    
+    if checkpoint_path.is_file():
+        # 直接加载指定的文件
+        print(f"Loading specific checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        if "model_state_dict" in checkpoint:
             model.load_state_dict(checkpoint["model_state_dict"])
-            print("Checkpoint loaded successfully")
         else:
-            print("Error: No checkpoints found!")
-            return
+            model.load_state_dict(checkpoint)
+        print("Checkpoint loaded successfully")
+    else:
+        # 尝试加载最佳模型或最新检查点
+        try:
+            best_metric = load_best_model(str(checkpoint_path), model, device)
+            print(f"Model loaded successfully (best metric: {best_metric:.4f})")
+        except FileNotFoundError:
+            print(f"Warning: Best model not found in {checkpoint_path}, looking for latest checkpoint...")
+            # 尝试加载最新检查点
+            if checkpoint_path.exists():
+                checkpoints = list(checkpoint_path.glob("checkpoint_*.pt"))
+                if checkpoints:
+                    checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    checkpoint_file = checkpoints[0]
+                    print(f"Loading checkpoint: {checkpoint_file}")
+                    checkpoint = torch.load(checkpoint_file, map_location=device)
+                    model.load_state_dict(checkpoint["model_state_dict"])
+                    print("Checkpoint loaded successfully")
+                else:
+                    print(f"Error: No checkpoints found in {checkpoint_path}!")
+                    return
+            else:
+                print(f"Error: Checkpoint path {checkpoint_path} does not exist!")
+                return
 
     # 确定评估参数（命令行参数优先）
     dataset = args.dataset or config.data.dataset

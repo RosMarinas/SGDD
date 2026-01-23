@@ -24,17 +24,23 @@ class CosineNoiseSchedule(nn.Module):
         betas: Noise schedule values at each timestep
     """
 
-    def __init__(self, num_timesteps: int = 1000, s: float = 0.008):
+    def __init__(self, num_timesteps: int = 1000, s: float = 0.008,
+                 min_alpha_bar: float = 0.001):
         """
         Initialize cosine noise schedule.
 
         Args:
             num_timesteps: Number of discrete timesteps (default: 1000)
             s: Small offset to prevent beta_0 from being too small (default: 0.008)
+            min_alpha_bar: Minimum alpha_bar at final timestep (default: 0.001)
+                          Controls how aggressive the schedule is. Lower values mean
+                          more aggressive corruption (more MASK tokens during training).
+                          Set to 0.001 or lower for near-complete MASK at high timesteps.
         """
         super().__init__()
         self.num_timesteps = num_timesteps
         self.s = s
+        self.min_alpha_bar = min_alpha_bar
 
         # Compute discrete cosine schedule
         # Based on: https://arxiv.org/abs/2102.09672
@@ -48,6 +54,11 @@ class CosineNoiseSchedule(nn.Module):
 
         # Normalize so alpha_bar_0 = 1
         alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+
+        # IMPORTANT: Rescale to reach min_alpha_bar at final timestep
+        # This ensures that at t=num_timesteps, alpha_bar is very small (~0.1% keep rate)
+        # instead of the default ~0%, forcing near-complete MASK during training
+        alphas_cumprod = alphas_cumprod * (1 - min_alpha_bar) + min_alpha_bar
 
         # Compute betas: beta_t = 1 - (alpha_bar_t / alpha_bar_{t-1})
         betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])

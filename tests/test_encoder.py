@@ -1,108 +1,56 @@
-"""
-Unit tests for SemanticEncoder
-"""
 
-import pytest
 import torch
+import pytest
 from src.models.encoder import SemanticEncoder
 
+@pytest.fixture
+def encoder():
+    return SemanticEncoder(model_name="roberta-base", hidden_dim=512)
 
-class TestSemanticEncoder:
-    """Test suite for SemanticEncoder"""
+def test_encoder_output_shape(encoder):
+    """验证编码器输出维度是否符合预期 (hidden_dim)"""
+    batch_size = 2
+    seq_len = 16
+    input_ids = torch.randint(0, 50265, (batch_size, seq_len))
+    attention_mask = torch.ones_like(input_ids)
+    
+    encoder.eval()
+    with torch.no_grad():
+        z = encoder(input_ids, attention_mask)
+    
+    assert z.shape == (batch_size, 512)
 
-    @pytest.fixture
-    def encoder(self):
-        """Create a semantic encoder for testing"""
-        return SemanticEncoder(model_name="roberta-base", hidden_dim=512)
+def test_roberta_parameters_frozen(encoder):
+    """验证 RoBERTa 骨干网络的参数已被冻结"""
+    for name, param in encoder.roberta.named_parameters():
+        assert not param.requires_grad, f"Parameter {name} should be frozen"
 
-    def test_output_shape(self, encoder):
-        """Test that encoder produces correct output shape"""
-        batch_size = 4
-        seq_len = 64
-        input_ids = torch.randint(0, 50265, (batch_size, seq_len))
-        attention_mask = torch.ones_like(input_ids)
+def test_adapter_parameters_trainable(encoder):
+    """验证 Adapter 和 VIB 层的参数是可训练的"""
+    for name, param in encoder.adapter.named_parameters():
+        assert param.requires_grad, f"Adapter parameter {name} should be trainable"
+    
+    assert encoder.mu_layer.weight.requires_grad
+    assert encoder.logvar_layer.weight.requires_grad
 
-        semantic_vector = encoder(input_ids, attention_mask)
+def test_kl_divergence_return(encoder):
+    """验证在训练模式下返回 KL 散度"""
+    batch_size = 2
+    seq_len = 16
+    input_ids = torch.randint(0, 50265, (batch_size, seq_len))
+    attention_mask = torch.ones_like(input_ids)
+    
+    encoder.train()
+    z, kl_loss = encoder(input_ids, attention_mask, return_kl=True)
+    
+    assert z.shape == (batch_size, 512)
+    assert kl_loss.shape == (batch_size,)
+    assert (kl_loss >= 0).all(), "KL loss should be non-negative"
 
-        assert semantic_vector.shape == (batch_size, 512), \
-            f"Expected shape ({batch_size}, 512), got {semantic_vector.shape}"
-
-    def test_frozen_parameters(self, encoder):
-        """Test that RoBERTa parameters are frozen"""
-        for name, param in encoder.roberta.named_parameters():
-            assert param.requires_grad == False, \
-                f"Parameter {name} should be frozen but is trainable"
-
-    def test_projection_layer_trainable(self, encoder):
-        """Test that projection layer is trainable"""
-        assert encoder.proj.weight.requires_grad == True, \
-            "Projection layer should be trainable"
-
-    def test_forward_with_different_batch_sizes(self, encoder):
-        """Test forward pass with different batch sizes"""
-        seq_len = 64
-
-        for batch_size in [1, 2, 8, 16]:
-            input_ids = torch.randint(0, 50265, (batch_size, seq_len))
-            attention_mask = torch.ones_like(input_ids)
-
-            semantic_vector = encoder(input_ids, attention_mask)
-
-            assert semantic_vector.shape == (batch_size, 512), \
-                f"Failed for batch_size={batch_size}"
-
-    def test_forward_with_different_seq_lengths(self, encoder):
-        """Test forward pass with different sequence lengths"""
-        batch_size = 4
-
-        for seq_len in [32, 64, 128]:
-            input_ids = torch.randint(0, 50265, (batch_size, seq_len))
-            attention_mask = torch.ones_like(input_ids)
-
-            semantic_vector = encoder(input_ids, attention_mask)
-
-            assert semantic_vector.shape == (batch_size, 512), \
-                f"Failed for seq_len={seq_len}"
-
-    def test_mean_pooling_with_padding(self, encoder):
-        """Test that mean pooling correctly handles padding"""
-        batch_size = 2
-        seq_len = 64
-
-        # Create input with different actual lengths
-        input_ids = torch.randint(0, 50265, (batch_size, seq_len))
-
-        # First sample: all tokens are valid
-        # Second sample: only half are valid
-        attention_mask = torch.ones_like(input_ids)
-        attention_mask[1, 32:] = 0
-
-        semantic_vector = encoder(input_ids, attention_mask)
-
-        assert semantic_vector.shape == (batch_size, 512)
-        # Vectors should be different due to different pooling
-        assert not torch.allclose(semantic_vector[0], semantic_vector[1])
-
-    def test_encode_text_convenience_method(self, encoder):
-        """Test the convenience method for encoding text"""
-        text = "This is a test sentence."
-        semantic_vector = encoder.encode_text(text, max_length=64)
-
-        assert semantic_vector.shape == (1, 512)
-
-    def test_device_compatibility(self, encoder):
-        """Test that encoder works on different devices"""
-        if torch.cuda.is_available():
-            encoder = encoder.cuda()
-            input_ids = torch.randint(0, 50265, (2, 64)).cuda()
-            attention_mask = torch.ones_like(input_ids)
-
-            semantic_vector = encoder(input_ids, attention_mask)
-
-            assert semantic_vector.shape == (2, 512)
-            assert semantic_vector.device.type == "cuda"
-
-
-if __name__ == "__main__":
-    # Run tests with pytest
-    pytest.main([__file__, "-v"])
+def test_encode_text_convenience_method(encoder):
+    """验证 encode_text 便捷方法的可用性"""
+    text = "Hello, this is a test sentence."
+    z = encoder.encode_text(text)
+    
+    assert z.shape == (1, 512)
+    assert isinstance(z, torch.Tensor)

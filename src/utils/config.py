@@ -21,6 +21,7 @@ class ModelConfig:
     # VIB配置
     kl_weight: float = 0.001  # KL divergence weight
     kl_anneal_steps: int = 10000  # KL annealing steps
+    whitening_stats_path: Optional[str] = None  # Path to whitening statistics file
 
     # 解码器配置 (字段名与 SGDDConfig 保持一致)
     num_layers: int = 6  # 对应 SGDDConfig 的 num_layers

@@ -1,0 +1,71 @@
+{
+  "metrics": {
+    "loss": 1.9645423967838287,
+    "exact_match": 0.0,
+    "bleu": 0.0,
+    "bleu1": 0.04062881649578233,
+    "bleu2": 0.002607355334994742,
+    "bleu3": 0.00021922452976338365,
+    "bleu4": 0.0,
+    "brevity_penalty": 1.0
+  },
+  "examples": [
+    {
+      "input": "-John M Harrel Telegram , January 31 , 1861",
+      "target": "-John M Harrel Telegram , January 31 , 1861",
+      "generated": "January 1861 ; William , , , Newboro , Et Helena . . 49 Lawrence , , Put ; Henry Edward , , Put , Put Richard Put ; rounding , 17 , Put , William , 1913 ,"
+    },
+    {
+      "input": "The governor would take possession of the arsenal in the name of the United States .",
+      "target": "The governor would take possession of the arsenal in the name of the United States .",
+      "generated": " unanimously annexed republic shall annex this republic shall : , annexed US constitutionS the republic shall shall shall shall shall court republic shall annexed king republic republic annexed ruled militia militia legislative republic . Supreme governing annexed annexed annexed annexed the republic . Confederacy upheld annexed immediately Treaty by republic Court annex charges Ezra duly annexed annexed Ruler legislature shall shall upheld annexed republic Ruler annex the justices republic annexed the militia embassy republic republic shall annexed annexed militia annexed unanimously annexed annexed .S shall : further abolish the Treaty . court governing Ruler embassy serve headed annexed annexed Constitution be annexed it governed militia justices militia republic . It annexed ruled the militia militia serves establishes serve republic below the statute annexed that republic"
+    },
+    {
+      "input": "The soldiers would be allowed safe passage in any direction carrying any personal and public property besides munitions of war .",
+      "target": "The soldiers would be allowed safe passage in any direction carrying any personal and public property besides munitions of war .",
+      "generated": " forbidden lawful borders granted protected protects any possession permitted aircraft unlawfully protected territories pedestrians were granted permitted granted transmission granted provisions protected respects granted granted any property or forbidden grounds territory . permitted further armour shall deny enforcement , conditions be cruel granted militia granted protected permission protected prisoners protected provisions institutions property protected into transportation permittedbors any buildings granted granted locomarations protected granted any permission forbidden granted provisions granted protected granted granted notice granted granted protected protected granted purposes granted grounds protected any permitted forbidden permitted grounds be granted granted granted peacefully granted granted grounds must forcibly permitted transport granted protected illegal granted disputes. protected aircraft granted territory granted granted any grounds be regulated nearby prisoners be granted granted necessaryidents"
+    },
+    {
+      "input": "The soldiers would be allowed to march away as men leaving under orders , not as conquered and surrendering soldiers .",
+      "target": "The soldiers would be allowed to march away as men leaving under orders , not as conquered and surrendering soldiers .",
+      "generated": " ruled hastily hastily hastily hastily hastily forbidden ; . adopted hastily took orders beasts exchanged allowed refused hastily . actsched hastily hastily exchanged hastily hastily hastily ; exchanged hastily exchanged apparently hastily attempts hastily forcibly prosecutions ."
+    },
+    {
+      "input": "M1822 .69 cal ( flintlock ) 5 @,@ 625",
+      "target": "M1822 .69 cal ( flintlock ) 5 @,@ 625",
+      "generated": " 680braBrool 4 @,.@ 0 @@ @ 850 Mach 700 slit cannon @ cm @ @ unstable@ 680 cannon@ knots @.. 316 dispro @ @ @.. Watts , slit @ knots@ 680 ; Merlin specmolmol unsupported @. 70023738 slit cannon 640 crater slit.@ magnification cannon magnification 15 @.@ 702 dive magnification magnification ; mass ; 680 Weiss288237 @ unstable@ 655 PW −@ slit ; brittle cannon @. flat )"
+    },
+    {
+      "input": "M1822 .69 cal ( percussion @-@ converted ) 53",
+      "target": "M1822 .69 cal ( percussion @-@ converted ) 53",
+      "generated": "Broad 16 6 @@ 297 02 @ 698 @ Weiss 770 700 psi cm . − ° .28 cm 235 psi 4 psi0 w.] , qualitative rare )"
+    },
+    {
+      "input": "M1842 .69 cal smoothbore ( percussion ) 357",
+      "target": "M1842 .69 cal smoothbore ( percussion ) 357",
+      "generated": " pus ) ClyGlass pus crystals titanium − 137 ) : VI . Hes Hes Si Broadrumuate enlarged commercially rare pus cm ; pusrum ) . thermal fragments"
+    },
+    {
+      "input": "M1855 .58 cal rifle @-@ muskets 900",
+      "target": "M1855 .58 cal rifle @-@ muskets 900",
+      "generated": "-.tail cannon guns-. turb MG + ± @ cannon :SUVC cannon cannon turret turb cannon turb Afgwing cannon turb cannon gun cannon cannon cannon cannon cannon cannon cannon cannon guns cannon MG57 cannon : spikes spotting guns cannon turret cannon cannon cannon cannon cannon turret cannon turb MGGU AN frame cannon cannon cannon squat cannon MGM fin horns cannon practuns muzzleonential gun cannon cannon Protestant cannon cannonIJSU cannon cannon cannon cannon cannon : dorsalwing turb cannon cannon rifle cannon af . dorsal cannon cannon cannon cannon cannon turb AN cannon basal cannon cannon Protestant cannon cannon cannon cannonive cannon cannon turburer cannon AN general gun cannon turret cannon turb"
+    },
+    {
+      "input": "M1817 common rifles 125",
+      "target": "M1817 common rifles 125",
+      "generated": "Old grey cannons :57 merchant MRASE enlarged guns"
+    },
+    {
+      "input": "M1841 rifle ( \" Mississippi Rifle \" ) 54",
+      "target": "M1841 rifle ( \" Mississippi Rifle \" ) 54",
+      "generated": " ) CAPUME 411 Beam ] dorsalChannel ) yellow CrimeainosaurInc ) margin mark 411 White ) margin \" cock ) 411 cock ) ) ) \" White limb ) Shark CSI clasp )redited ; ) 1957 ? Yellow violet ( CB CAP ] \" pole ) Shark ] CSI CAPUME colour mark ] clasp ) ) 55 Shark \" Sharp margin ) Blue Fraser ) gives Sensor CSI"
+    }
+  ],
+  "config": {
+    "dataset": "mixed",
+    "split": "validation",
+    "num_samples": 1000,
+    "num_inference_steps": 32,
+    "cfg_scale": 2.0
+  }
+}
