@@ -495,7 +495,7 @@ class DiffusionDecoder(nn.Module):
         ffn_dim: int = 2048,
         max_len: int = 64,
         dropout: float = 0.1,
-        roberta_embeddings: Optional[torch.Tensor] = None,
+        pretrained_embeddings: Optional[torch.Tensor] = None,
     ):
         """
         Initialize diffusion decoder with AdaLN architecture.
@@ -509,7 +509,7 @@ class DiffusionDecoder(nn.Module):
             ffn_dim: Feed-forward network dimension
             max_len: Maximum sequence length
             dropout: Dropout rate
-            roberta_embeddings: Optional RoBERTa embeddings for initialization
+            pretrained_embeddings: Optional pretrained embeddings for initialization
         """
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -520,8 +520,11 @@ class DiffusionDecoder(nn.Module):
 
         # Token embeddings
         self.token_emb = nn.Embedding(vocab_size, hidden_dim)
-        if roberta_embeddings is not None:
-            self.token_emb.weight.data.copy_(roberta_embeddings)
+        if pretrained_embeddings is not None:
+            self.token_emb.weight.data.copy_(pretrained_embeddings)
+
+        # Absolute positional embeddings (Crucial for non-autoregressive generation from all-MASK)
+        self.pos_emb = nn.Embedding(max_len, hidden_dim)
 
         # RoPE positional embeddings
         self.rotary_emb = RotaryEmbedding(hidden_dim // num_heads, max_position_embeddings=max_len)
@@ -544,9 +547,9 @@ class DiffusionDecoder(nn.Module):
         # Tie output weights with input embeddings (weight tying)
         self.output_proj.weight = self.token_emb.weight
 
-        # Initialize output layer with RoBERTa embeddings if provided
-        if roberta_embeddings is not None:
-            self.output_proj.weight.data.copy_(roberta_embeddings)
+        # Initialize output layer with pretrained embeddings if provided
+        if pretrained_embeddings is not None:
+            self.output_proj.weight.data.copy_(pretrained_embeddings)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -574,6 +577,10 @@ class DiffusionDecoder(nn.Module):
 
         # Embed tokens
         x = self.token_emb(input_ids)  # [batch, seq_len, hidden_dim]
+
+        # Add absolute positional embeddings
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)
+        x = x + self.pos_emb(positions)
 
         # Self-conditioning: add embedding of previous prediction
         if prev_pred is not None:

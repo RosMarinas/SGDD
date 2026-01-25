@@ -174,7 +174,8 @@ def main():
     # 创建模型配置
     model_config = ModelConfig(
         encoder_model=config.model.encoder_name,
-        hidden_dim=config.model.semantic_dim,
+        semantic_dim=config.model.semantic_dim,
+        decoder_dim=config.model.decoder_dim,
         kl_weight=config.model.kl_weight,
         kl_anneal_steps=config.model.kl_anneal_steps,
         whitening_stats_path=config.model.whitening_stats_path,
@@ -243,31 +244,15 @@ def main():
     # 加载数据
     print(f"\nLoading {dataset} dataset ({split} split)...")
 
-    if dataset == "wikipedia":
+    dataset_kwargs = {}
+    if dataset == "bookcorpus":
         dataset_kwargs = {
-            "num_samples": config.data.wiki_num_samples,
-            "min_length": config.data.wiki_min_length,
-            "max_length": config.data.wiki_max_length,
-        }
-    elif dataset == "qqp":
-        dataset_kwargs = {
-            "num_samples": config.data.qqp_num_samples,
-            "min_length": config.data.qqp_min_length,
-        }
-    elif dataset == "mixed":
-        # 混合数据集配置
-        dataset_kwargs = {
-            "wiki_num_samples": config.data.wiki_num_samples,
-            "wiki_min_length": config.data.wiki_min_length,
-            "wiki_max_length": config.data.wiki_max_length,
-            "alpaca_num_samples": config.data.alpaca_num_samples,
-            "alpaca_min_length": config.data.alpaca_min_length,
-            "oasst1_num_samples": config.data.oasst1_num_samples,
-            "oasst1_min_length": config.data.oasst1_min_length,
-            "max_token_length": config.model.max_length,
+            "dataset_path": config.data.dataset_path,
+            "max_token_length": config.data.max_token_length,
+            "min_length": config.data.min_length,
         }
     else:
-        raise ValueError(f"Unknown dataset: {dataset}")
+        raise ValueError(f"Unknown dataset: {dataset}. Only 'bookcorpus' is supported.")
 
     dataloader = get_dataloader(
         dataset_name=dataset,
@@ -275,6 +260,7 @@ def main():
         batch_size=batch_size,
         num_workers=config.data.num_workers,
         pin_memory=config.data.pin_memory,
+        tokenizer_name=config.model.encoder_name,
         **dataset_kwargs,
     )
 

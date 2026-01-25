@@ -1,8 +1,8 @@
 """
-Semantic Encoder - Frozen Encoder (BGE-M3 / RoBERTa) for extracting semantic vectors.
+Semantic Encoder - Frozen Encoder (BGE-M3) for extracting semantic vectors.
 
 This module implements a frozen semantic encoder that uses a pre-trained model (default: BGE-M3)
-to extract deep semantic representations from input text via mean pooling.
+to extract deep semantic representations from input text via [CLS] pooling.
 """
 
 import torch
@@ -13,9 +13,9 @@ import warnings
 
 class SemanticEncoder(nn.Module):
     """
-    Frozen semantic encoder using BGE-M3 (default).
+    Frozen semantic encoder using BGE-M3.
 
-    Extracts semantic vectors from input text using mean pooling over
+    Extracts semantic vectors from input text using [CLS] pooling over
     the final hidden states, then optionally projects to the decoder dimension.
     """
 
@@ -194,26 +194,20 @@ class SemanticEncoder(nn.Module):
 
 if __name__ == "__main__":
     print("Testing SemanticEncoder with BGE-M3...")
-    # NOTE: This might fail if BAAI/bge-m3 is not cached and no internet, but usually safe
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
-        encoder = SemanticEncoder(model_name="BAAI/bge-m3", hidden_dim=512)
+        encoder = SemanticEncoder(model_name="BAAI/bge-m3", hidden_dim=512).to(device)
         print("[OK] Encoder initialized with BGE-M3")
         
         batch_size = 2
         seq_len = 32
         # XLM-R vocab size is larger, max ID is 250001
-        input_ids = torch.randint(0, 250002, (batch_size, seq_len))
-        attention_mask = torch.ones_like(input_ids)
+        input_ids = torch.randint(0, 250002, (batch_size, seq_len)).to(device)
+        attention_mask = torch.ones_like(input_ids).to(device)
 
         z = encoder(input_ids, attention_mask)
         print(f"[OK] Forward pass output shape: {z.shape}")
         assert z.shape == (batch_size, 512)
         
     except Exception as e:
-        print(f"Skipping BGE-M3 test due to load error (network?): {e}")
-        print("Falling back to roberta-base test")
-        encoder = SemanticEncoder(model_name="roberta-base", hidden_dim=512)
-        input_ids = torch.randint(0, 50265, (2, 32))
-        attention_mask = torch.ones_like(input_ids)
-        z = encoder(input_ids, attention_mask)
-        print(f"[OK] RoBERTa Forward pass output shape: {z.shape}")
+        print(f"Error testing BGE-M3: {e}")

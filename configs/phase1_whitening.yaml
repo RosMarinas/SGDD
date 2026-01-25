@@ -1,6 +1,6 @@
 # Phase 1: Whitening Optimization
-# Task: Reconstruction with Whitening
-# Dataset: Mixed (Wikipedia + Alpaca + OASST1)
+# Task: Reconstruction with Whitening (BGE-M3 + BookCorpus)
+# Dataset: BookCorpus
 
 # Model Config
 model:
@@ -8,7 +8,7 @@ model:
   encoder_freeze: true
   semantic_dim: 1024
   decoder_dim: 256
-  # whitening_stats_path: "data/whitening_stats.pt" # Disabled for BGE-M3 (better space)
+  # whitening_stats_path: "data/whitening_stats_bge.pt" 
 
   # VIB Configuration
   kl_weight: 0.1
@@ -18,10 +18,10 @@ model:
   num_layers: 2
   num_heads: 4
   ffn_dim: 1024
-  max_length: 128
+  max_length: 64
   dropout: 0.1
 
-  num_diffusion_steps: 256
+  num_diffusion_steps: 1000
   noise_schedule: "cosine"
 
   # Training Optimization
@@ -50,24 +50,15 @@ training:
   save_epochs: 5
 
   use_wandb: true
-  wandb_project: "sgdd-vib"
-  wandb_run_name: "phase1_whitening"
+  wandb_project: "sgdd-vib-bge"
+  wandb_run_name: "phase1_whitening_bookcorpus"
 
 # Data Config
 data:
-  dataset: "mixed"
-  mixing_strategy: "fast_validation"
-  total_samples: 100000
-
-  wiki_num_samples: 60000
-  wiki_min_length: 20
-  wiki_max_length: 128
-
-  alpaca_num_samples: 30000
-  alpaca_min_length: 20
-
-  oasst1_num_samples: 10000
-  oasst1_min_length: 20
+  dataset: "bookcorpus"
+  dataset_path: "data/BookCorpus/final_dataset_1.4B"
+  max_token_length: 64
+  min_length: 5
 
   num_workers: 4
   pin_memory: true
@@ -75,7 +66,7 @@ data:
 
 # Inference Config
 inference:
-  num_inference_steps: 256
+  num_inference_steps: 16
   temperature: 1.0
   cfg_scale: 2.0
   sampling_strategy: "confidence"
@@ -83,6 +74,6 @@ inference:
 # System Config
 seed: 520
 device: "cuda"
-checkpoint_dir: "checkpoints/phase1_whitening"
-log_dir: "logs/phase1_whitening"
+checkpoint_dir: "checkpoints/phase1_whitening_bge"
+log_dir: "logs/phase1_whitening_bge"
 task: "reconstruction"

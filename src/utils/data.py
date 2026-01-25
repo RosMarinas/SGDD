@@ -4,7 +4,7 @@
 """
 import torch
 from torch.utils.data import Dataset, DataLoader
-from transformers import RobertaTokenizer
+from transformers import RobertaTokenizer, AutoTokenizer
 from datasets import load_from_disk
 from typing import Dict, Optional, Tuple
 from pathlib import Path
@@ -21,6 +21,7 @@ class BookCorpusDataset(Dataset):
     def __init__(
         self,
         dataset_path: str,
+        tokenizer_name: str = "BAAI/bge-m3",
         max_token_length: int = 64,
         min_length: int = 5,
         split: str = "train",
@@ -30,17 +31,8 @@ class BookCorpusDataset(Dataset):
         self.split = split
 
         # 加载 Tokenizer
-        print("Loading Tokenizer...")
-        try:
-            # 延迟导入以避免版本兼容性问题
-            from modelscope.hub.snapshot_download import snapshot_download
-            # 使用 ModelScope 上的 roberta-base 镜像
-            model_dir = snapshot_download('AI-ModelScope/roberta-base', cache_dir=str(DATA_DIR / "model_cache"))
-            self.tokenizer = RobertaTokenizer.from_pretrained(model_dir)
-        except Exception as e:
-            print(f"ModelScope tokenizer load failed: {e}, trying HuggingFace...")
-            # 回退尝试
-            self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+        print(f"Loading Tokenizer: {tokenizer_name}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         # 加载数据集
         print(f"Loading BookCorpus dataset from {dataset_path} ({split} split)...")
@@ -114,6 +106,7 @@ def get_dataloader(
     batch_size: int = 32,
     num_workers: int = 4,
     pin_memory: bool = True,
+    tokenizer_name: str = "BAAI/bge-m3",
     **dataset_kwargs,
 ) -> DataLoader:
     
@@ -125,13 +118,14 @@ def get_dataloader(
         
         dataset = BookCorpusDataset(
             dataset_path=dataset_path,
+            tokenizer_name=tokenizer_name,
             max_token_length=max_token_length,
             min_length=min_length,
             split=split
         )
         collate_fn = collate_fn_bookcorpus
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}. Only 'bookcorpus' is supported now.")
+        raise ValueError(f"Unknown dataset: {dataset_name}. Only 'bookcorpus' is supported.")
 
     dataloader = DataLoader(
         dataset,

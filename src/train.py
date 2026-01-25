@@ -293,6 +293,7 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         "batch_size": config.training.batch_size,
         "num_workers": config.data.num_workers,
         "pin_memory": config.data.pin_memory,
+        "tokenizer_name": config.model.encoder_name,
     }
 
     # 根据数据集类型设置参数

@@ -53,7 +53,7 @@ class SGDDModel(nn.Module):
     Semantic-Guided Discrete Diffusion Model.
 
     Combines:
-    - Frozen semantic encoder (RoBERTa / BGE-M3)
+    - Frozen semantic encoder (BGE-M3)
     - Noise schedule (cosine)
     - Trainable diffusion decoder
 
@@ -102,7 +102,7 @@ class SGDDModel(nn.Module):
             ffn_dim=config.ffn_dim,
             max_len=config.max_len,
             dropout=config.dropout,
-            roberta_embeddings=encoder_embeddings_proj,
+            pretrained_embeddings=encoder_embeddings_proj,
         )
 
         # Noise schedule
@@ -501,39 +501,27 @@ class SGDDModel(nn.Module):
 if __name__ == "__main__":
     # Quick test
     print("Testing SGDDModel...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Note: Default config now uses BGE-M3 which requires internet or cache
-    # If it fails, fallback to roberta for basic testing
     try:
         config = SGDDConfig()
-        model = SGDDModel(config)
+        model = SGDDModel(config).to(device)
         print(f"[OK] Model initialized with {config.encoder_model}")
         
         # Test forward pass with correct vocab size
         vocab_size = config.vocab_size
         batch_size = 2
         seq_len = 64
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
-        attention_mask = torch.ones_like(input_ids)
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len)).to(device)
+        attention_mask = torch.ones_like(input_ids).to(device)
 
         logits, target_tokens, loss_mask, kl_loss = model(input_ids, attention_mask, cfg_uncond=True)
         print(f"[OK] Forward pass successful")
         print(f"  Logits shape: {logits.shape}")
         
     except Exception as e:
-        print(f"Warning: BGE-M3 load failed ({e}). Testing with roberta-base.")
-        config = SGDDConfig(encoder_model="roberta-base", vocab_size=50265)
-        model = SGDDModel(config)
-        print("[OK] Model initialized with roberta-base fallback")
-        
-        vocab_size = 50265
-        batch_size = 2
-        seq_len = 64
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
-        attention_mask = torch.ones_like(input_ids)
-        
-        logits, target_tokens, loss_mask, kl_loss = model(input_ids, attention_mask, cfg_uncond=True)
-        print(f"[OK] Forward pass successful")
+        print(f"Error testing SGDDModel: {e}")
+        exit(1)
 
     # Count parameters
     total_params = model.get_num_params()
