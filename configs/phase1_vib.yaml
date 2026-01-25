@@ -16,7 +16,7 @@ model:
   num_layers: 2
   num_heads: 4
   ffn_dim: 1024
-  max_length: 128
+  max_length: 64
   dropout: 0.1
 
   # Diffusion 配置
@@ -55,25 +55,12 @@ training:
 
 # 数据配置
 data:
-  dataset: "mixed"
-  mixing_strategy: "fast_validation"
-  total_samples: 100
-
-  # Wikipedia 配置
-  wiki_num_samples: 6000
-  wiki_min_length: 20
-  wiki_max_length: 128
-  wiki_max_token_length: 128  # 添加这个参数以匹配模型 max_length
-
-  # Alpaca 配置
-  alpaca_num_samples: 30000
-  alpaca_min_length: 20
-  alpaca_max_token_length: 128  # 添加这个参数
-
-  # OASST1 配置
-  oasst1_num_samples: 30000
-  oasst1_min_length: 20
-  oasst1_max_token_length: 128  # 添加这个参数
+  dataset: "bookcorpus"
+  dataset_path: "data/BookCorpus/final_dataset_1.4B"
+  
+  # 数据处理
+  max_token_length: 64
+  min_length: 5
 
   num_workers: 4
   pin_memory: true
@@ -93,6 +80,6 @@ inference:
 # 系统配置
 seed: 42
 device: "cuda"
-checkpoint_dir: "checkpoints/phase1_vib"
+checkpoint_dir: "checkpoints/phase1_vib_bge"
 log_dir: "logs/phase1_vib_bge"
 task: "reconstruction"

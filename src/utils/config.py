@@ -81,37 +81,20 @@ class DataConfig:
     """数据配置"""
 
     # 数据集选择
-    dataset: str = "wikipedia"  # wikipedia, qqp, mixed
+    dataset: str = "bookcorpus"  # bookcorpus
 
-    # Wikipedia配置
-    wiki_num_samples: int = 100000
-    wiki_min_length: int = 20
-    wiki_max_length: int = 128
-    wiki_max_token_length: int = 128  # Added to match YAML config
+    # 数据集路径
+    dataset_path: str = "data/BookCorpus/final_dataset_1.4B"
 
-    # QQP配置
-    qqp_num_samples: int = 100000
-    qqp_min_length: int = 10
-
-    # 混合数据配置
-    mixing_strategy: str = "none"  # "none" | "fast_validation" | "scale_up" | "full_scale"
-    total_samples: int = 100000
-
-    # Alpaca配置
-    alpaca_num_samples: int = 0
-    alpaca_min_length: int = 20
-    alpaca_max_token_length: int = 128  # Added to match YAML config
-
-    # OpenAssistant配置
-    oasst1_num_samples: int = 0
-    oasst1_min_length: int = 20
-    oasst1_max_token_length: int = 128  # Added to match YAML config
+    # 数据处理
+    max_token_length: int = 64  # 根据用户反馈，绝大部分数据在64以内
+    min_length: int = 5  # 过滤过短文本
 
     # 数据加载
     num_workers: int = 4
     pin_memory: bool = True
-
-    # 训练/验证分割
+    
+    # 训练/验证分割 (如果数据集本身没有划分)
     val_split: float = 0.03
 
 
@@ -215,10 +198,8 @@ class SGDDConfig:
         # 数据配置
         lines.append("\n[Data]")
         lines.append(f"  Dataset: {self.data.dataset}")
-        if self.data.dataset == "wikipedia":
-            lines.append(f"  Samples: {self.data.wiki_num_samples}")
-        elif self.data.dataset == "qqp":
-            lines.append(f"  Samples: {self.data.qqp_num_samples}")
+        lines.append(f"  Path: {self.data.dataset_path}")
+        lines.append(f"  Max Length: {self.data.max_token_length}")
 
         # 推理配置
         lines.append("\n[Inference]")

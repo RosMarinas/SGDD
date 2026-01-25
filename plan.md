@@ -4,6 +4,19 @@
 
 
 
+## 2026-01-25 数据接口更新 (BookCorpus) - ✅ 已完成
+
+根据最新需求，数据接口已更新为适配新的BookCorpus数据集。
+
+### 变更点
+1. **数据集**: 切换到 `data/BookCorpus/final_dataset_1.4B`
+2. **格式**: 支持HuggingFace Arrow/Parquet格式 (load_from_disk)
+3. **接口**: 重写 `src/utils/data.py`，移除旧的Wikipedia/QQP/Mixed接口，新增 `BookCorpusDataset`
+4. **配置**: 更新 `DataConfig`，移除旧数据集参数，新增 `dataset_path` 和 `max_token_length` (默认64)
+5. **训练**: 更新 `train.py` 适配新的参数传递
+
+---
+
 ## 2026-01-23 Encoder升级计划 (BGE-M3) - ✅ 已完成
 
 鉴于RoBERTa效果一般，已切换到BGE-M3 (`BAAI/bge-m3`) 作为语义编码器。

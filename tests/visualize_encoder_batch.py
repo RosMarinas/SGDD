@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.encoder import SemanticEncoder
-from src.utils.data import OASSTDataset, collate_fn_wiki
+from src.utils.data import BookCorpusDataset, collate_fn_bookcorpus
 
 def visualize_encoder_batch():
     """
@@ -33,23 +33,22 @@ def visualize_encoder_batch():
     encoder.to(device)
     encoder.eval()
 
-    # 2. Load Dataset (Small subset)
-    print("Loading Dataset (Oasst1s)...")
-    # We only need a few samples, so keep num_samples small to speed up loading if possible
-    dataset = OASSTDataset(
-        num_samples=100, 
-        min_length=20, 
-        max_token_length=128,
+    # 2. Load Dataset (BookCorpus)
+    print("Loading Dataset (BookCorpus)...")
+    # We only need a few samples
+    dataset = BookCorpusDataset(
+        dataset_path="data/BookCorpus/final_dataset_1.4B",
+        max_token_length=64,
         split="train"
     )
     
-    # Select 10 samples randomly
+    # Select 20 samples randomly
     np.random.seed(42)
     indices = np.random.choice(len(dataset), size=20, replace=False)
     samples = [dataset[i] for i in indices]
     
     # Collate
-    batch = collate_fn_wiki(samples)
+    batch = collate_fn_bookcorpus(samples)
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
     texts = batch["texts"]
