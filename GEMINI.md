@@ -19,3 +19,9 @@
 
 - `plan.md` - Detailed implementation plan (in Chinese)
 - `GEMINI.md` - This file
+
+## Recent Updates (2026-01-25)
+- **Resolved Issue #8 (Smoke Testing)**: Validated model architecture with a 64-sample overfitting test.
+- **Critical Fixes**:
+  - `DiffusionDecoder`: Added absolute positional embeddings to handle all-MASK inference inputs.
+  - `SGDDModel`: Corrected MaskGIT generation schedule (reverse diffusion t=1.0->0.0).

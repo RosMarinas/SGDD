@@ -254,14 +254,22 @@ def run_smoke_test():
             # Check first 5 positions
             for i in range(5):
                 top_vals, top_idxs = torch.topk(probs[0, i], 5)
-                print(f"Pos {i}: {[(tokenizer.decode([idx]), val.item()) for idx, val in zip(top_idxs, top_vals)]}")
+                # Decode and print ID to debug empty strings
+                debug_tokens = []
+                for idx, val in zip(top_idxs, top_vals):
+                    token_str = tokenizer.decode([idx])
+                    if not token_str:
+                        token_str = "<EMPTY>"
+                    debug_tokens.append(f"({idx}:'{token_str}', {val.item():.4f})")
+                print(f"Pos {i}: {debug_tokens}")
 
         with torch.no_grad():
             # Use deterministic generation with low temp
+            # IMPORTANT: guidance_scale=0.0 because we trained with cfg_prob=0.0
             generated_text = model.generate(
                 input_text=test_text,
                 num_steps=32, 
-                guidance_scale=1.0, 
+                guidance_scale=0.0, 
                 max_length=128,
                 temperature=0.01, # Almost greedy
                 top_k=-1,

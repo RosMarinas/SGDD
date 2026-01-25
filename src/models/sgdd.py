@@ -366,15 +366,25 @@ class SGDDModel(nn.Module):
         )
         # [batch, max_length]
 
-        # MaskGIT iterative decoding
-        timesteps = torch.linspace(0, 1, num_steps + 1)[1:]
-        # [num_steps]
-
-        for step_idx, t in enumerate(timesteps):
-            # Convert continuous time to discrete timestep
-            timestep = torch.tensor(
-                [int(t * self.noise_schedule.num_timesteps)] * batch_size,
-                device=device,
+        # MaskGIT iterative decoding: t goes from 1.0 down to 0.0
+        # We perform num_steps iterations.
+        # t_schedule: [1.0, ..., >0]
+        t_schedule = torch.linspace(1.0, 0.0, num_steps + 1)
+        
+        for step_idx in range(num_steps):
+            t_curr = t_schedule[step_idx]
+            t_next = t_schedule[step_idx + 1]
+            
+            # Convert continuous time to discrete timestep for model input
+            # Clamp to [0, num_timesteps-1]
+            timestep_val = int(t_curr * (self.noise_schedule.num_timesteps - 1))
+            timestep_val = max(0, min(self.noise_schedule.num_timesteps - 1, timestep_val))
+            
+            timestep = torch.full(
+                (batch_size,), 
+                timestep_val,
+                device=device, 
+                dtype=torch.long
             )
 
             # Prepare self-conditioning from previous step
@@ -382,17 +392,21 @@ class SGDDModel(nn.Module):
             if step_idx > 0:
                 # Use previous iteration's tokens as self-conditioning
                 prev_pred = current_tokens.clone()
-
-            # Number of tokens to unmask at this step
-            # Cosine schedule: more tokens in early steps
-            # We calculate this per sample, but for efficiency we use mean or just first sample's count
-            # Assuming all samples have similar mask rate progress
-            current_masked_counts = (current_tokens == mask_token_id).sum(dim=1)
-            # Use the max masked count to determine how many to unmask (conservative)
-            num_masked = current_masked_counts.float().mean().item()
             
-            num_to_unmask = int((1 - t) * num_masked / 2)
-            num_to_unmask = max(1, num_to_unmask)
+            # Calculate target mask ratio for the end of this step
+            # We want to match the noise schedule at t_next
+            timestep_next_val = int(t_next * (self.noise_schedule.num_timesteps - 1))
+            timestep_next_val = max(0, min(self.noise_schedule.num_timesteps - 1, timestep_next_val))
+            
+            # Get alpha_bar at t_next
+            # alpha_bar represents probability of KEEPING a token
+            # So mask ratio = 1 - alpha_bar
+            alpha_bar_next = self.noise_schedule.get_alpha_bar(torch.tensor([timestep_next_val], device=device))
+            target_mask_ratio = 1.0 - alpha_bar_next.item()
+            
+            # Ensure final step clears everything (ratio=0)
+            if step_idx == num_steps - 1:
+                target_mask_ratio = 0.0
 
             # Conditional prediction
             logits_cond = self.decoder(current_tokens, semantic_vector, timestep, prev_pred=prev_pred)
@@ -402,14 +416,14 @@ class SGDDModel(nn.Module):
             with torch.no_grad():  # Don't need gradients for unconditional
                 logits_uncond = self.decoder(current_tokens, semantic_vector_uncond, timestep, prev_pred=prev_pred)
 
-            # Classifier-free guidance (in-place to save memory)
+            # Classifier-free guidance
             guided_logits = logits_cond + guidance_scale * (logits_cond - logits_uncond)
 
-            # Debug logging for first step (first sample only) - before deletion
+            # Debug logging for first step (first sample only)
             if step_idx == 0:
                 print(f"[DEBUG] Step 0 sample 0: logits range=[{logits_cond[0].min():.2f}, {logits_cond[0].max():.2f}]")
 
-            # Free memory immediately
+            # Free memory
             del logits_cond, logits_uncond
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
@@ -431,22 +445,27 @@ class SGDDModel(nn.Module):
 
             if masked_positions.sum() == 0:
                 break
-
-            # Batched sampling is tricky because different samples have different masks.
-            # We iterate over batch for simplicity in logic, though vectorization is possible.
+            
+            # Determine which tokens to unmask
+            # We unmask based on confidence
             
             for b in range(batch_size):
                 mask_indices = torch.where(masked_positions[b])[0]
-                if len(mask_indices) == 0:
+                num_currently_masked = len(mask_indices)
+                if num_currently_masked == 0:
                     continue
+                
+                # Calculate how many tokens should remain masked
+                num_to_keep_masked = int(max_length * target_mask_ratio)
+                num_to_unmask = max(1, num_currently_masked - num_to_keep_masked)
+                
+                # Don't unmask more than we have
+                num_to_unmask = min(num_to_unmask, num_currently_masked)
                 
                 probs_at_masked = probs[b][mask_indices]
                 # [num_masked_b, vocab]
                 
-                # Clamp and renormalize
-                probs_at_masked = torch.clamp(probs_at_masked, min=0, max=1)
-                probs_at_masked = probs_at_masked / probs_at_masked.sum(dim=-1, keepdim=True)
-
+                # Sample candidate tokens
                 # Top-k sampling
                 if top_k > 0 and top_k < probs_at_masked.size(-1):
                     top_k_probs, top_k_indices = torch.topk(
@@ -460,16 +479,23 @@ class SGDDModel(nn.Module):
                 else:
                     sampled_tokens = torch.multinomial(probs_at_masked, num_samples=1).squeeze(-1)
                 
-                # Confidence-based selection
-                confidence = probs_at_masked.max(dim=-1)[0]
+                # Confidence-based selection for unmasking
+                # We pick the `num_to_unmask` tokens with highest confidence
+                # Confidence is the probability of the sampled token
+                # gathered_probs = probs_at_masked.gather(1, sampled_tokens.unsqueeze(1)).squeeze(1)
+                # Note: 'confidence' usually means max probability, but here we used sampled tokens.
+                # Standard MaskGIT uses max probability as confidence score.
                 
-                if num_to_unmask < len(sampled_tokens):
-                    _, topk_indices = torch.topk(confidence, num_to_unmask)
-                    tokens_to_fill = sampled_tokens[topk_indices]
-                    positions_to_update = mask_indices[topk_indices]
-                    current_tokens[b, positions_to_update] = tokens_to_fill
-                else:
-                    current_tokens[b, mask_indices] = sampled_tokens
+                confidence_scores = probs_at_masked.max(dim=-1)[0]
+                
+                # Select top confidence indices to unmask
+                _, top_conf_indices = torch.topk(confidence_scores, num_to_unmask)
+                
+                # Indices in the original sequence
+                indices_to_update = mask_indices[top_conf_indices]
+                tokens_to_fill = sampled_tokens[top_conf_indices]
+                
+                current_tokens[b, indices_to_update] = tokens_to_fill
 
         # Decode tokens
         generated_ids = current_tokens.cpu().numpy()
