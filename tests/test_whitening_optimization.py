@@ -1,4 +1,6 @@
-
+"""
+this is a old test script for whitening optimization test.s
+"""
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt

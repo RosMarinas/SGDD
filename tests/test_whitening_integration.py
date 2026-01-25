@@ -1,3 +1,6 @@
+"""_summary_
+the frame of this script is a old test script for whitening integration test.
+"""
 import torch
 import torch.nn as nn
 import os
