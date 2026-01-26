@@ -79,6 +79,9 @@ class SGDDModel(nn.Module):
             whitening_stats_path=config.whitening_stats_path,
         )
 
+        # Tokenizer from encoder
+        self.tokenizer = self.encoder.tokenizer
+
         # Decoder Embedding Initialization with Pretrained Encoder Weights
         # Initialize decoder embeddings with projected encoder embeddings
         # Source: Encoder Dim (1024) -> Target: Decoder Dim (256)
@@ -114,10 +117,8 @@ class SGDDModel(nn.Module):
         self.diffusion = DiscreteDiffusion(
             noise_schedule=self.noise_schedule,
             num_classes=config.vocab_size,
+            mask_token_id=self.tokenizer.mask_token_id,
         )
-
-        # Tokenizer from encoder
-        self.tokenizer = self.encoder.tokenizer
 
     def forward(
         self,

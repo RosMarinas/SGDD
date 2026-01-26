@@ -576,6 +576,23 @@ class DiffusionDecoder(nn.Module):
         device = input_ids.device
 
         # Embed tokens
+        # Debug checks
+        if torch.isnan(input_ids).any():
+             print("[ERROR] input_ids contains NaN")
+             raise ValueError("NaN in input_ids")
+
+        if input_ids.min() < 0:
+            print(f"[ERROR] input_ids min ({input_ids.min().item()}) < 0")
+            raise ValueError("Negative token ID")
+
+        if input_ids.max() >= self.vocab_size:
+            print(f"[ERROR] input_ids max ({input_ids.max().item()}) >= vocab_size ({self.vocab_size})")
+            raise ValueError("Token ID out of bounds")
+        
+        if seq_len > self.pos_emb.num_embeddings:
+            print(f"[ERROR] seq_len ({seq_len}) > max_len ({self.pos_emb.num_embeddings})")
+            raise ValueError("Sequence length out of bounds")
+
         x = self.token_emb(input_ids)  # [batch, seq_len, hidden_dim]
 
         # Add absolute positional embeddings

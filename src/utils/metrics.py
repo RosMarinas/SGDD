@@ -211,7 +211,7 @@ def evaluate_generation(
     device: torch.device,
     max_samples: Optional[int] = None,
 ) -> Dict[str, float]:
-    """评估生成模型
+    """评估生成模型 (BookCorpus 重构任务)
 
     Args:
         model: SGDD模型
@@ -234,24 +234,18 @@ def evaluate_generation(
 
             # 移动数据到设备
             input_ids = batch["input_ids"].to(device)
-            attention_mask = batch.get("attention_mask", batch.get("attention_mask_q1")).to(device)
+            attention_mask = batch["attention_mask"].to(device)
 
-            # 获取目标
-            if "target_ids" in batch:
-                # QQP数据集
-                target_ids = batch["target_ids"].to(device)
-                target_mask = batch.get("target_mask", attention_mask).to(device)
-            else:
-                # Wikipedia数据集
-                target_ids = input_ids
-                target_mask = attention_mask
-
-            # 前向传播
-            semantic_vector = model.encoder(input_ids, attention_mask)
-            logits = model.decoder(target_ids, semantic_vector, timestep=torch.zeros(input_ids.size(0), dtype=torch.long, device=device))
+            # 前向传播 (使用与训练一致的逻辑)
+            # 注意: 验证时不使用 CFG dropout (cfg_uncond=False)
+            logits, target_tokens, loss_mask, kl_loss = model(
+                input_ids,
+                attention_mask,
+                cfg_uncond=False,
+            )
 
             # 计算损失
-            loss = compute_masked_loss(logits, target_ids, target_mask)
+            loss = model.compute_loss(logits, target_tokens, loss_mask, kl_loss)
 
             total_loss += loss.item() * input_ids.size(0)
             total_samples += input_ids.size(0)

@@ -87,7 +87,7 @@ def train_epoch(
     optimizer.zero_grad()
 
     # 统一的autocast context
-    autocast = torch.amp.autocast('cuda') if (config.training.use_fp16 and scaler is not None) else nullcontext()
+    autocast = torch.amp.autocast('cuda') if  (config.training.use_fp16 and scaler is not None) else nullcontext()
 
     # Determine validation batch count for ~1000 samples
     val_batch_size = config.training.batch_size * 2
@@ -103,18 +103,10 @@ def train_epoch(
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
 
-        # 获取目标 (QQP数据集需要特殊处理)
-        if "target_ids" in batch:
-            # QQP: 使用target_ids作为目标
-            target_ids = batch["target_ids"].to(device)
-            # 用input_ids提取语义向量
-            semantic_input_ids = input_ids
-            semantic_attention_mask = attention_mask
-        else:
-            # Wikipedia: 重构任务,目标是input_ids
-            target_ids = input_ids
-            semantic_input_ids = input_ids
-            semantic_attention_mask = attention_mask
+        # BookCorpus: 重构任务, 目标是 input_ids
+        target_ids = input_ids
+        semantic_input_ids = input_ids
+        semantic_attention_mask = attention_mask
 
         # 统一的前向传播和反向传播
         with autocast:
@@ -321,7 +313,7 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         model_name=config.model.encoder_name,
         hidden_dim=config.model.semantic_dim,
     )
-    vocab_size = temp_encoder.tokenizer.vocab_size
+    vocab_size = len(temp_encoder.tokenizer)
     print(f"Detected vocab_size: {vocab_size} from {config.model.encoder_name}")
     del temp_encoder  # 释放临时编码器
 
@@ -375,16 +367,11 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         "tokenizer_name": config.model.encoder_name,
     }
 
-    # 根据数据集类型设置参数
-    if config.data.dataset == "bookcorpus":
-        dataset_kwargs = {
-            "dataset_path": config.data.dataset_path,
-            "max_token_length": config.data.max_token_length,
-            "min_length": config.data.min_length,
-        }
-    else:
-        # Fallback or error if other datasets are attempted (though config restricts this)
-        raise ValueError(f"Unknown dataset: {config.data.dataset}. Only 'bookcorpus' is supported.")
+    dataset_kwargs = {
+        "dataset_path": config.data.dataset_path,
+        "max_token_length": config.data.max_token_length,
+        "min_length": config.data.min_length,
+    }
 
     train_loader = get_dataloader(
         dataset_name=config.data.dataset,
@@ -393,8 +380,7 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         **dataset_kwargs,
     )
 
-    # 验证时使用更大的批大小(验证时不需要反向传播,显存占用更小)
-    # 使用训练时的2倍以加快验证速度
+    # 验证时使用更大的批大小
     val_dataloader_kwargs = dataloader_kwargs.copy()
     val_dataloader_kwargs["batch_size"] = config.training.batch_size * 2
 
