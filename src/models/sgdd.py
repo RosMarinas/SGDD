@@ -30,7 +30,7 @@ class SGDDConfig:
 
     # Decoder
     decoder_dim: int = 256  # Reduced dimension for lightweight model
-    num_layers: int = 2  # Reduced layers
+    num_layers: int = 4  # Reduced layers
     num_heads: int = 4  # 256 / 64 = 4 heads
     ffn_dim: int = 1024  # 4 * 256
     max_len: int = 128

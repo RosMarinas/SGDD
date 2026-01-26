@@ -3,14 +3,14 @@
 
 # 模型配置
 model:
-  encoder_name: "BAAI/bge-m3"
+  encoder_name: "BAAI/bge-large-en-v1.5"  # 使用 BGE Large 作为编码器
   encoder_freeze: true
   semantic_dim: 1024  # High semantic dimension
   decoder_dim: 256    # Lightweight decoder
   
   # VIB Configuration (now default behavior)
   kl_weight: 0.2  # Conservative KL weight
-  kl_anneal_steps: 800  # Anneal KL weight over first 10K steps
+  kl_anneal_steps: 8000  # Anneal KL weight over first 10K steps
 
   # Decoder 配置
   num_layers: 2
@@ -45,8 +45,9 @@ training:
   cfg_drop_prob: 0.15  # 15% unconditional batches for CFG
 
   log_interval: 20
+  eval_interval: 1000
   save_interval: 1000
-  save_epochs: 20
+  save_epochs: 0 # 禁用按 epoch 保存，改用按 step 滚动保存
 
   use_wandb: true
   wandb_project: "sgdd-vib-bge"

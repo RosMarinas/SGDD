@@ -1,6 +1,5 @@
 """训练脚本
-HF_ENDPOINT=https://hf-mirror.com python src/train.py --config configs/phase1_wiki.yaml
-支持Wikipedia重构和QQP改写任务的训练,包含WandB日志、检查点保存、评估等功能。
+HF_ENDPOINT=https://hf-mirror.com python src/train.py --config configs/phase1_vib.yaml
 """
 
 import os
@@ -14,7 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import argparse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import asdict
 import wandb
 
@@ -46,8 +45,13 @@ def train_epoch(
     device: torch.device,
     config: Config,
     epoch: int,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
-) -> Dict[str, float]:
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    val_loader: DataLoader,
+    val_iter_wrapper: List[Any],
+    best_metric_wrapper: Dict[str, float],
+    global_step: int,
+    checkpoint_dir: Path,
+) -> Tuple[Dict[str, float], int]:
     """训练一个epoch
 
     Args:
@@ -59,17 +63,22 @@ def train_epoch(
         config: 配置
         epoch: 当前epoch
         scaler: 混合精度scaler
+        val_loader: 验证集加载器
+        val_iter_wrapper: 包含验证集迭代器的列表 [iterator]
+        best_metric_wrapper: 包含最佳指标的字典 {'value': float}
+        global_step: 全局步数
+        checkpoint_dir: 检查点目录
 
     Returns:
-        训练指标字典
+        训练指标字典, 更新后的global_step
     """
     from contextlib import nullcontext
 
     model.train()
 
     total_loss = 0.0
-    total_recon_loss = 0.0  # NEW: Track reconstruction separately
-    total_kl_loss = 0.0  # NEW: Track KL separately
+    total_recon_loss = 0.0
+    total_kl_loss = 0.0
     num_batches = 0
 
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
@@ -80,7 +89,16 @@ def train_epoch(
     # 统一的autocast context
     autocast = torch.amp.autocast('cuda') if (config.training.use_fp16 and scaler is not None) else nullcontext()
 
+    # Determine validation batch count for ~1000 samples
+    val_batch_size = config.training.batch_size * 2
+    num_val_batches = max(1, 1000 // val_batch_size)
+    
+    # 验证间隔: 优先使用 config 中的 eval_interval, 如果没设置则默认 1000
+    eval_interval = getattr(config.training, 'eval_interval', 1000)
+
     for batch_idx, batch in enumerate(progress_bar):
+        global_step += 1
+        
         # 移动数据到设备
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
@@ -163,7 +181,6 @@ def train_epoch(
         if (batch_idx + 1) % config.training.log_interval == 0:
             avg_loss = total_loss / num_batches  # 当前epoch的平均loss
             avg_kl = total_kl_loss / num_batches
-            step = epoch * len(dataloader) + batch_idx + 1
             if config.training.use_wandb:
                 # 计算当前 KL 权重 (用于日志)
                 kl_anneal_ratio = min(1.0, model.encoder._current_step / model.encoder.kl_anneal_steps)
@@ -177,7 +194,7 @@ def train_epoch(
                     "train/kl_weight": current_kl_weight,
                     "train/batch_loss": raw_loss,  # 当前batch的瞬时loss
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
-                    "train/step": step,
+                    "train/step": global_step,
                 }
                 
                 # 记录梯度范数 (如果这一步进行了更新)
@@ -190,6 +207,68 @@ def train_epoch(
                 
                 wandb.log(log_dict)
 
+        # --- 按步数进行验证 ---
+        if global_step % eval_interval == 0:
+            # 准备验证数据 (从迭代器获取下 num_val_batches 个 batch)
+            val_batches = []
+            for _ in range(num_val_batches):
+                try:
+                    batch = next(val_iter_wrapper[0])
+                    val_batches.append(batch)
+                except StopIteration:
+                    # 重新初始化迭代器
+                    val_iter_wrapper[0] = iter(val_loader)
+                    try:
+                        batch = next(val_iter_wrapper[0])
+                        val_batches.append(batch)
+                    except StopIteration:
+                        break # 数据集为空
+
+            if val_batches:
+                # 运行验证
+                val_metrics = evaluate_generation(
+                    model,
+                    val_batches, # 传递 batch 列表 (它是可迭代的，兼容 dataloader 接口)
+                    device,
+                    max_samples=None # 我们已经控制了 batch 数量
+                )
+                
+                print(f"\nStep {global_step} Validation: {format_metrics(val_metrics, prefix='val_')}")
+
+                if config.training.use_wandb:
+                    wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
+                
+                # 保存最佳模型
+                val_loss = val_metrics.get("loss", float('inf'))
+                if val_loss < best_metric_wrapper['value']:
+                    best_metric_wrapper['value'] = val_loss
+                    save_best_model(
+                        model,
+                        val_loss,
+                        "val_loss",
+                        checkpoint_dir,
+                        asdict(config) if hasattr(config, "__dict__") else vars(config),
+                        metric_higher_is_better=False,
+                    )
+                    print(f"New best model saved with val_loss={val_loss:.4f}")
+
+                # 滚动保存检查点 (只保留最近3个)
+                checkpoint_path = checkpoint_dir / f"checkpoint_step_{global_step}.pt"
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    global_step,
+                    raw_loss, # 使用当前 batch loss 或 val_loss
+                    asdict(config) if hasattr(config, "__dict__") else vars(config),
+                    checkpoint_path,
+                )
+                cleanup_old_checkpoints(checkpoint_dir, keep_last_n=3)
+                
+            # 恢复训练模式
+            model.train()
+
     # 返回平均损失
     avg_loss = total_loss / num_batches
     avg_kl = total_kl_loss / num_batches
@@ -198,7 +277,7 @@ def train_epoch(
         "loss": avg_loss,
         "reconstruction_loss": avg_loss - avg_kl,
         "kl_loss": avg_kl,
-    }
+    }, global_step
 
 
 def train(config: Config, resume_from: Optional[str] = None) -> None:
@@ -370,7 +449,11 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         print(f"Resumed from epoch {start_epoch}, global_step={global_step}")
     else:
         # 如果不是从checkpoint恢复,根据start_epoch计算global_step
-        global_step = start_epoch * len(train_loader)
+        global_step = start_epoch * (len(train_loader) // config.training.gradient_accumulation_steps)
+
+    # 初始化验证迭代器和最佳指标包装器 (用于在 train_epoch 中修改)
+    val_iter_wrapper = [iter(val_loader)]
+    best_metric_wrapper = {'value': best_metric}
 
     # 训练循环
     print("\nStarting training...")
@@ -380,8 +463,8 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
         print(f"Epoch {epoch + 1}/{config.training.num_epochs}")
         print(f"{'=' * 60}")
 
-        # 训练
-        train_metrics = train_epoch(
+        # 训练 (验证和保存现在在 train_epoch 中按 step 进行)
+        train_metrics, global_step = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -390,63 +473,17 @@ def train(config: Config, resume_from: Optional[str] = None) -> None:
             config,
             epoch,
             scaler,
-        )
-
-        print(f"\nTrain metrics: {format_metrics(train_metrics, prefix='train_')}")
-
-        # 每个epoch结束后进行验证
-        print("\nRunning validation...")
-        val_metrics = evaluate_generation(
-            model,
             val_loader,
-            device,
-            max_samples=1000,  # 只评估100个样本以加快速度
+            val_iter_wrapper,
+            best_metric_wrapper,
+            global_step,
+            checkpoint_dir,
         )
-        print(f"Val metrics: {format_metrics(val_metrics, prefix='val_')}")
 
-        # 记录到WandB
-        if config.training.use_wandb:
-            wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
+        print(f"\nEpoch {epoch + 1} completed. Train metrics: {format_metrics(train_metrics, prefix='train_')}")
 
-        # 保存最佳模型 (基于验证loss,越小越好)
-        # evaluate_generation返回{"loss": avg_loss, "perplexity": perplexity}
-        val_loss = val_metrics.get("loss", float('inf'))
-        if val_loss < best_metric and epoch >=5:  # 只在前5个epoch后考虑保存最佳模型
-            best_metric = val_loss
-            save_best_model(
-                model,
-                best_metric,
-                "val_loss",
-                checkpoint_dir,
-                asdict(config) if hasattr(config, "__dict__") else vars(config),
-                metric_higher_is_better=False,  # loss越小越好
-            )
-            print(f"New best model saved with val_loss={best_metric:.4f}")
-
-        # 保存检查点
-        if config.training.save_epochs > 0:
-            should_save = (epoch + 1) % config.training.save_epochs == 0
-        else:
-            save_freq = max(1, config.training.save_interval // len(train_loader))
-            should_save = (epoch + 1) % save_freq == 0
-            
-        if should_save or epoch == config.training.num_epochs - 1:
-            checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch + 1}.pt"
-            save_checkpoint(
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                global_step,
-                train_metrics["loss"],
-                asdict(config) if hasattr(config, "__dict__") else vars(config),
-                checkpoint_path,
-            )
-
-            # 清理旧检查点
-            cleanup_old_checkpoints(checkpoint_dir, keep_last_n=5)
-
-        global_step += len(train_loader)
+    # 更新最终的最佳指标用于打印
+    best_metric = best_metric_wrapper['value']
 
     print("\n" + "=" * 60)
     print("Training completed!")
