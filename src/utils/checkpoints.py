@@ -83,8 +83,29 @@ def load_checkpoint(
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    # 加载模型状态
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # 加载模型状态 (允许部分缺失，以支持新增的buffer)
+    missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    
+    if missing_keys:
+        print(f"Warning: Missing keys in checkpoint: {missing_keys}")
+        # Backward compatibility: Patch encoder._current_step if missing
+        # Check if the missing key is exactly 'encoder._current_step' or ends with it
+        if any(k.endswith("encoder._current_step") for k in missing_keys):
+             # Try to retrieve global step from checkpoint metadata
+             global_step = checkpoint.get("step", 0)
+             print(f"Patching missing encoder._current_step with global_step={global_step}")
+             
+             # Manually update the buffer if the model structure matches
+             if hasattr(model, "encoder") and hasattr(model.encoder, "_current_step"):
+                 # _current_step is now a registered buffer (tensor)
+                 if isinstance(model.encoder._current_step, torch.Tensor):
+                     model.encoder._current_step.fill_(global_step)
+                 else:
+                     # Fallback if it were still a scalar (unlikely given my other fix)
+                     model.encoder._current_step = global_step
+
+    if unexpected_keys:
+        print(f"Warning: Unexpected keys in checkpoint: {unexpected_keys}")
 
     # 加载优化器状态
     if optimizer is not None and "optimizer_state_dict" in checkpoint:

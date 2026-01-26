@@ -175,7 +175,9 @@ def train_epoch(
             avg_kl = total_kl_loss / num_batches
             if config.training.use_wandb:
                 # 计算当前 KL 权重 (用于日志)
-                kl_anneal_ratio = min(1.0, model.encoder._current_step / model.encoder.kl_anneal_steps)
+                # Handle _current_step as tensor (buffer) or int
+                current_step_val = model.encoder._current_step.item() if isinstance(model.encoder._current_step, torch.Tensor) else model.encoder._current_step
+                kl_anneal_ratio = min(1.0, current_step_val / model.encoder.kl_anneal_steps)
                 current_kl_weight = model.encoder.kl_weight * kl_anneal_ratio
                 
                 log_dict = {

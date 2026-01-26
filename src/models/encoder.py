@@ -61,7 +61,7 @@ class SemanticEncoder(nn.Module):
         self.kl_weight = kl_weight
         self.kl_anneal_steps = kl_anneal_steps
         self.kl_threshold = kl_threshold
-        self._current_step = 0
+        self.register_buffer('_current_step', torch.tensor(0, dtype=torch.long))
 
         # --- Whitening (Optimization) ---
         # Only enable whitening if stats match dimensions
@@ -156,7 +156,9 @@ class SemanticEncoder(nn.Module):
         # KL Divergence
         current_kl_weight = self.kl_weight
         if self.training:
-            anneal_ratio = min(1.0, self._current_step / self.kl_anneal_steps)
+            # Use .item() if _current_step is a tensor (buffer), though tensor arithmetic handles it too
+            step_value = self._current_step.item() if isinstance(self._current_step, torch.Tensor) else self._current_step
+            anneal_ratio = min(1.0, step_value / self.kl_anneal_steps)
             current_kl_weight *= anneal_ratio
 
         kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
