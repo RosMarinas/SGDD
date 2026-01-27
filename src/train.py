@@ -86,6 +86,21 @@ def train_epoch(
     # 梯度累积:只在循环开始时清零一次
     optimizer.zero_grad()
 
+    # 安全同步: 确保 encoder step 与 global_step 同步
+    # 这解决了在 epoch 边界或恢复训练时 _current_step 可能未正确保存/加载导致 KL 权重重置的问题
+    if hasattr(model, "encoder") and hasattr(model.encoder, "_current_step"):
+        current_encoder_step = model.encoder._current_step.item() if isinstance(model.encoder._current_step, torch.Tensor) else model.encoder._current_step
+        
+        print(f"[Epoch {epoch+1} Start] Global Step: {global_step}, Encoder Step: {current_encoder_step}")
+        
+        if current_encoder_step < global_step:
+            print(f"WARNING: Encoder step ({current_encoder_step}) lagged behind global step ({global_step}). Syncing...")
+            if isinstance(model.encoder._current_step, torch.Tensor):
+                model.encoder._current_step.fill_(global_step)
+            else:
+                model.encoder._current_step = global_step
+            print(f"Synced Encoder Step to: {model.encoder._current_step.item()}")
+    
     # 统一的autocast context
     autocast = torch.amp.autocast('cuda') if  (config.training.use_fp16 and scaler is not None) else nullcontext()
 

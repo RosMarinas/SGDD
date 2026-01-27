@@ -1,5 +1,22 @@
 # 实施计划：Semantic-Guided Discrete Diffusion (SGDD) 模型
 
+## 2026-01-27 Encoder 优化 (BGE-Base) - ✅ 已完成
+
+为了平衡模型大小与性能，并将维度统一，已将编码器从 `BAAI/bge-large-en-v1.5` 替换为 `BAAI/bge-base-en-v1.5`。
+
+### 变更详情
+1. **模型切换**: `BAAI/bge-large-en-v1.5` -> `BAAI/bge-base-en-v1.5`
+2. **维度统一**: Encoder 输出与 Decoder 维度统一为 **768**，消除了维度投影带来的潜在信息损失。
+3. **Decoder 调整**:
+    - Hidden Dim: 512 -> 768
+    - FFN Dim: 2048 -> 3072
+    - Heads: 8 -> 12
+    - Layers: 保持 4 层
+    - 词表: 适配 BERT tokenizer (30,522 tokens)
+4. **配置更新**: 更新 `configs/phase1_vib.yaml` 以反映上述更改。
+
+---
+
 ## 2026-01-25 冒烟测试与修复 - ✅ 已完成
 
 完成了对模型的全面冒烟测试，并修复了在测试过程中发现的生成问题。
@@ -54,10 +71,10 @@
 ## 项目概述
 
 构建一个轻量级的、非自回归的离散扩散语言模型，该模型：
-- 使用冻结的 BGE-M3 提取语义向量作为输入
+- 使用冻结的 BGE-Base 提取语义向量作为输入
 - 生成短文本（≤64 tokens），基于语义向量进行条件生成
 - 使用 MaskGIT 风格的迭代解码和分类器无关引导（CFG）
-- 目标参数量：~40-70M 可训练参数，适配 RTX 4070 Ti Super
+- 目标参数量：~70-80M 可训练参数，适配 RTX 4070 Ti Super
 
 
 ## 项目结构
@@ -66,7 +83,7 @@
 SGDD/
 ├── src/
 │   ├── models/
-│   │   ├── encoder.py           # 冻结BGE-M3编码器 (+ VIB)
+│   │   ├── encoder.py           # 冻结BGE-Base编码器 (+ VIB)
 │   │   ├── decoder.py           # AdaLN-Zero解码器
 │   │   ├── diffusion.py         # 噪声调度和扩散过程
 │   │   └── sgdd.py              # 完整模型

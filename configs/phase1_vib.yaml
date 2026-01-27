@@ -3,19 +3,19 @@
 
 # 模型配置
 model:
-  encoder_name: "BAAI/bge-large-en-v1.5"  # 使用 BGE Large 作为编码器
+  encoder_name: "BAAI/bge-base-en-v1.5"  # 使用 BGE Base 作为编码器
   encoder_freeze: true
-  semantic_dim: 1024  # High semantic dimension
-  decoder_dim: 512    # Lightweight decoder
+  semantic_dim: 768  # Base model dimension
+  decoder_dim: 768    # Matching decoder dimension (no reduction)
   
   # VIB Configuration (now default behavior)
-  kl_weight: 0.2  # Conservative KL weight
-  kl_anneal_steps: 4000  # Anneal KL weight over first 10K steps
+  kl_weight: 0.05  # Reduced from 0.2 to avoid early KL dominance
+  kl_anneal_steps: 8000  # Anneal KL weight over first 10K steps
 
   # Decoder 配置
   num_layers: 4
-  num_heads: 8
-  ffn_dim: 2048
+  num_heads: 12  # 768 / 64 = 12 heads
+  ffn_dim: 3072  # 4 * 768
   max_length: 64
   dropout: 0.15
 
@@ -33,13 +33,13 @@ model:
 training:
   learning_rate: 0.0004
   weight_decay: 0.01
-  batch_size: 512
+  batch_size: 256
   num_epochs: 4
   gradient_accumulation_steps: 1
   grad_clip: 1.0
 
   lr_scheduler: "cosine"
-  warmup_steps: 4000  # 减少到 ~1 个 epoch
+  warmup_steps: 5000  # 减少到 ~1 个 epoch
 
   use_fp16: true
   cfg_drop_prob: 0.15  # 15% unconditional batches for CFG
@@ -52,7 +52,7 @@ training:
   use_wandb: true
   wandb_project: "sgdd-vib-bge"
   wandb_entity: null
-  wandb_run_name: "phase1_vib_experiment"
+  wandb_run_name: "phase1_vib_bge_base_experiment"
 
 # 数据配置
 data:
@@ -81,6 +81,6 @@ inference:
 # 系统配置
 seed: 42
 device: "cuda"
-checkpoint_dir: "checkpoints/phase1_vib_bge"
-log_dir: "logs/phase1_vib_bge"
+checkpoint_dir: "checkpoints/phase1_vib_bge_base"
+log_dir: "logs/phase1_vib_bge_base"
 task: "reconstruction"

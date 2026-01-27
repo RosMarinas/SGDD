@@ -21,8 +21,8 @@ class SemanticEncoder(nn.Module):
 
     def __init__(
         self,
-        model_name: str = "BAAI/bge-large-en-v1.5",
-        hidden_dim: int = 512,
+        model_name: str = "BAAI/bge-base-en-v1.5",
+        hidden_dim: int = 768,
         kl_weight: float = 0.001,
         kl_anneal_steps: int = 10000,
         kl_threshold: float = 0.0,
@@ -32,8 +32,8 @@ class SemanticEncoder(nn.Module):
         Initialize the semantic encoder with a dual-path VIB architecture.
 
         Args:
-            model_name: HuggingFace model name (default: "BAAI/bge-m3")
-            hidden_dim: Output dimension for semantic vector (default: 512)
+            model_name: HuggingFace model name (default: "BAAI/bge-base-en-v1.5")
+            hidden_dim: Output dimension for semantic vector (default: 768)
             kl_weight: Weight for KL divergence loss
             kl_anneal_steps: Number of steps for KL annealing
             kl_threshold: Minimum KL value (free bits)
